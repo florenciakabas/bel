@@ -87,7 +87,6 @@ class BayesianEvidentialLearning:
             cross_correlation_matrix=self.cross_correlation
         )
         
-        pdb.set_trace()
         # Well data
         self.well_locations = []
         self.well_measurements = []

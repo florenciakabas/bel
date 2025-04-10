@@ -2,89 +2,120 @@ import torch
 import gpytorch
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from typing import Callable, List, Optional, Tuple, Union
+from scipy.stats import norm
 
-class ExplorationGP:
+class BasinExplorationGP:
     """
-    A comprehensive framework for Gaussian Process-based exploration planning.
-    
-    This class handles:
-    - Multi-output GPs for modeling related geological properties
-    - Various acquisition functions for well planning
-    - Visualization and evaluation utilities
-    - Sequential drilling strategies
+    Comprehensive framework for basin exploration using multi-output GPs.
     """
     
-    def __init__(
-        self, 
-        n_outputs: int = 2, 
-        input_dim: int = 2,
-        kernel_type: str = 'rbf',
-        rank: int = 2,
-        normalize_data: bool = True,
-        learning_rate: float = 0.1,
-        training_iterations: int = 200
-    ):
+    def __init__(self, basin_size=(10, 10), properties=['porosity', 'permeability', 'thickness']):
         """
-        Initialize the Exploration GP framework.
+        Initialize the Basin Exploration GP framework.
         
         Args:
-            n_outputs: Number of output variables (geological properties)
-            input_dim: Input dimensionality (typically 2 for spatial coordinates)
-            kernel_type: Type of kernel ('rbf', 'matern', etc.)
-            rank: Rank of the multi-output kernel (controls correlation complexity)
-            normalize_data: Whether to normalize input and output data
-            learning_rate: Learning rate for model optimization
-            training_iterations: Number of iterations for model training
+            basin_size: Size of the basin in (x, y) kilometers
+            properties: List of geological properties to model
         """
-        self.n_outputs = n_outputs
-        self.input_dim = input_dim
-        self.kernel_type = kernel_type
-        self.rank = rank
-        self.normalize_data = normalize_data
-        self.learning_rate = learning_rate
-        self.training_iterations = training_iterations
+        self.basin_size = basin_size
+        self.properties = properties
+        self.n_properties = len(properties)
         
-        # Will be initialized later
+        # Model components will be initialized later
         self.model = None
         self.likelihood = None
-        self.X = None
-        self.Y = None
-        self.X_mean = None
-        self.X_std = None
-        self.Y_mean = None
-        self.Y_std = None
         
-    def _create_base_kernel(self):
-        """Create the appropriate base kernel based on kernel_type."""
-        if self.kernel_type.lower() == 'rbf':
-            return gpytorch.kernels.RBFKernel(ard_num_dims=self.input_dim)
-        elif self.kernel_type.lower() == 'matern':
-            return gpytorch.kernels.MaternKernel(ard_num_dims=self.input_dim, nu=2.5)
-        elif self.kernel_type.lower() == 'periodic':
-            return gpytorch.kernels.PeriodicKernel(ard_num_dims=self.input_dim)
-        else:
-            raise ValueError(f"Unsupported kernel type: {self.kernel_type}")
+        # Data storage
+        self.wells = []  # List of well data
+        
+        # History tracking
+        self.exploration_history = []
+        # For the add_well function:
     
-    def _initialize_model(self, X, Y):
-        """Initialize the multi-output GP model."""
+
+    def add_well(self, location, measurements, well_name=None):
+        """
+        Add a well to the dataset.
+        
+        Args:
+            location: (x, y) coordinates of the well
+            measurements: Dictionary mapping property names to measured values
+            well_name: Optional name for the well
+        """
+        if well_name is None:
+            well_name = f"Well_{len(self.wells) + 1}"
+            
+        # Convert measurements to consistent format
+        property_values = []
+        measurement_mask = []
+        
+        for prop in self.properties:
+            if prop in measurements:
+                property_values.append(measurements[prop])
+                measurement_mask.append(True)
+            else:
+                property_values.append(float('nan'))
+                measurement_mask.append(False)
+        
+        well_data = {
+            'name': well_name,
+            'location': np.array(location),  # Ensure location is a NumPy array
+            'measurements': np.array(property_values),
+            'mask': np.array(measurement_mask),
+            'date_added': len(self.wells)
+        }
+        
+        self.wells.append(well_data)
+
+    def _prepare_training_data(self):
+        """
+        Prepare training data from wells.
+        
+        Returns:
+            X: Well locations [n_wells, 2]
+            Y: Property measurements [n_wells, n_properties]
+            mask: Boolean mask for valid measurements [n_wells, n_properties]
+        """
+        n_wells = len(self.wells)
+        
+        X = np.zeros((n_wells, 2))
+        Y = np.zeros((n_wells, self.n_properties))
+        mask = np.zeros((n_wells, self.n_properties), dtype=bool)
+        
+        for i, well in enumerate(self.wells):
+            X[i] = well['location']
+            Y[i] = well['measurements']
+            mask[i] = well['mask']
+            
+        # Convert to PyTorch tensors
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        Y_tensor = torch.tensor(Y, dtype=torch.float32)
+        
+        # Handle missing values (replace NaNs with dummy values that will be masked)
+        Y_tensor[torch.isnan(Y_tensor)] = 0.0
+            
+        return X_tensor, Y_tensor, mask
+    
+    def _create_model(self, X, Y):
+        """Create the multi-output GP model."""
         # Define model class internally
         class MultitaskGPModel(gpytorch.models.ExactGP):
-            def __init__(self, train_x, train_y, likelihood, base_kernel, n_outputs, rank):
+            def __init__(self, train_x, train_y, likelihood, n_properties):
                 super(MultitaskGPModel, self).__init__(train_x, train_y, likelihood)
                 
                 # Mean module
                 self.mean_module = gpytorch.means.MultitaskMean(
-                    gpytorch.means.ConstantMean(), num_tasks=n_outputs
+                    gpytorch.means.ConstantMean(), num_tasks=n_properties
                 )
                 
-                # Base kernel (shared across tasks)
-                self.base_covar_module = gpytorch.kernels.ScaleKernel(base_kernel)
+                # Base kernel
+                self.base_covar_module = gpytorch.kernels.ScaleKernel(
+                    gpytorch.kernels.MaternKernel(nu=1.5)
+                )
                 
                 # Multi-task kernel
                 self.covar_module = gpytorch.kernels.MultitaskKernel(
-                    self.base_covar_module, num_tasks=n_outputs, rank=rank
+                    self.base_covar_module, num_tasks=n_properties, rank=n_properties-1
                 )
             
             def forward(self, x):
@@ -92,504 +123,630 @@ class ExplorationGP:
                 covar_x = self.covar_module(x)
                 return gpytorch.distributions.MultitaskMultivariateNormal(mean_x, covar_x)
         
-        # Create base kernel
-        base_kernel = self._create_base_kernel()
-        
         # Initialize likelihood and model
-        self.likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=self.n_outputs)
-        self.model = MultitaskGPModel(X, Y, self.likelihood, base_kernel, self.n_outputs, self.rank)
+        self.likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=self.n_properties)
+        self.model = MultitaskGPModel(X, Y, self.likelihood, self.n_properties)
     
-    def fit(self, X, Y, verbose=True):
+    def fit(self, learning_rate=0.01, iterations=500, verbose=True):
         """
-        Fit the GP model to observed data.
+        Fit the GP model to the well data.
         
         Args:
-            X: Input coordinates (well locations) [n_samples, input_dim]
-            Y: Output values (geological properties) [n_samples, n_outputs]
+            learning_rate: Learning rate for optimization
+            iterations: Number of training iterations
             verbose: Whether to print training progress
         """
-        X = torch.tensor(X, dtype=torch.float32) if not isinstance(X, torch.Tensor) else X
-        Y = torch.tensor(Y, dtype=torch.float32) if not isinstance(Y, torch.Tensor) else Y
+        # Prepare training data
+        X, Y, mask = self._prepare_training_data()
         
-        # Store original data
-        self.X = X
-        self.Y = Y
+        # Create model
+        self._create_model(X, Y)
         
-        # Normalize data if requested
-        if self.normalize_data:
-            self.X_mean, self.X_std = X.mean(dim=0), X.std(dim=0)
-            self.Y_mean, self.Y_std = Y.mean(dim=0), Y.std(dim=0)
-            
-            # Avoid division by zero
-            self.X_std = torch.where(self.X_std == 0, torch.ones_like(self.X_std), self.X_std)
-            self.Y_std = torch.where(self.Y_std == 0, torch.ones_like(self.Y_std), self.Y_std)
-            
-            X_normalized = (X - self.X_mean) / self.X_std
-            Y_normalized = (Y - self.Y_mean) / self.Y_std
-        else:
-            X_normalized = X
-            Y_normalized = Y
-            self.X_mean, self.X_std = 0.0, 1.0
-            self.Y_mean, self.Y_std = 0.0, 1.0
-        
-        # Initialize model
-        self._initialize_model(X_normalized, Y_normalized)
-        
-        # Train the model
+        # Training
         self.model.train()
         self.likelihood.train()
         
         # Define optimizer
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         
-        # Loss function
-        mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.likelihood, self.model)
+        # Custom loss function to handle missing data
+        def masked_loss(output, target, mask):
+            # Convert mask to float tensor
+            mask_tensor = torch.tensor(mask, dtype=torch.float32)
+            
+            # Mean of the output distribution
+            mean = output.mean
+            
+            # Calculate negative log likelihood only for observed values
+            masked_diff = (mean - target) * mask_tensor
+            masked_diff_sq = masked_diff ** 2
+            
+            # Get task noise from likelihood
+            task_noises = self.likelihood.task_noises.reshape(-1)
+            
+            # Calculate loss term for each task
+            loss_terms = []
+            for i in range(self.n_properties):
+                # Only include terms for observed values
+                observed = mask[:, i]
+                observed_tensor = torch.tensor(observed, dtype=torch.bool)
+                if torch.any(observed_tensor):
+                    # Extract relevant parts for this task
+                    observed_indices = torch.where(observed_tensor)[0]
+                    y_observed = target[observed_indices, i]
+                    mean_observed = mean[observed_indices, i]
+                    
+                    # Negative log likelihood for Gaussian
+                    task_loss = 0.5 * torch.sum((y_observed - mean_observed)**2 / task_noises[i])
+                    task_loss += 0.5 * torch.sum(torch.log(2 * np.pi * task_noises[i])) * observed_tensor.sum()
+                    
+                    loss_terms.append(task_loss)
+            
+            return sum(loss_terms) if loss_terms else torch.tensor(0.0, requires_grad=True)
         
         # Training loop
-        for i in range(self.training_iterations):
+        for i in range(iterations):
             optimizer.zero_grad()
-            output = self.model(X_normalized)
-            loss = -mll(output, Y_normalized)
+            output = self.model(X)
+            loss = masked_loss(output, Y, mask)
             loss.backward()
             optimizer.step()
             
-            if verbose and (i % 50 == 0 or i == self.training_iterations - 1):
-                print(f'Iteration {i+1}/{self.training_iterations} - Loss: {loss.item():.4f}')
+            if verbose and (i % 100 == 0 or i == iterations - 1):
+                print(f'Iteration {i+1}/{iterations} - Loss: {loss.item():.4f}')
         
         # Set model to evaluation mode
         self.model.eval()
         self.likelihood.eval()
         
-        return self
-    
-    def predict(self, X_new):
+
+    def predict(self, grid):
         """
-        Make predictions at new points.
+        Make predictions across a grid of locations.
         
         Args:
-            X_new: New input points [n_points, input_dim]
+            grid: Grid of points to predict at [n_points, 2]
             
         Returns:
-            mean: Predicted means [n_points, n_outputs]
-            variance: Predicted variances [n_points, n_outputs]
-        """
-        X_new = torch.tensor(X_new, dtype=torch.float32) if not isinstance(X_new, torch.Tensor) else X_new
-        
-        # Normalize inputs
-        if self.normalize_data:
-            X_new_normalized = (X_new - self.X_mean) / self.X_std
-        else:
-            X_new_normalized = X_new
-        
-        # Make predictions
-        with torch.no_grad(), gpytorch.settings.fast_pred_var():
-            predictions = self.likelihood(self.model(X_new_normalized))
-            mean = predictions.mean
-            variance = predictions.variance
-        
-        # Denormalize outputs
-        if self.normalize_data:
-            mean = mean * self.Y_std + self.Y_mean
-        
-        return mean, variance
-    
-    def get_property_correlation(self):
-        """
-        Extract the learned correlation between properties.
-        
-        Returns:
-            corr_matrix: Property correlation matrix [n_outputs, n_outputs]
-        """
-        with torch.no_grad():
-            task_covar_matrix = self.model.covar_module.task_covar_module.covar_matrix.evaluate()
-            task_corr_matrix = task_covar_matrix / torch.sqrt(
-                torch.diag(task_covar_matrix).reshape(-1, 1) * torch.diag(task_covar_matrix).reshape(1, -1)
-            )
-        
-        return task_corr_matrix.numpy()
-    
-    def calculate_acquisition(self, X_new, acquisition_type='variance'):
-        """
-        Calculate acquisition function values for candidate points.
-        
-        Args:
-            X_new: Candidate points [n_points, input_dim]
-            acquisition_type: Type of acquisition function:
-                - 'variance': Total predictive variance
-                - 'ivr': Integrated variance reduction
-                - 'ei': Expected improvement (for targeting high property values)
-                
-        Returns:
-            acq_values: Acquisition function values [n_points]
-        """
-        X_new = torch.tensor(X_new, dtype=torch.float32) if not isinstance(X_new, torch.Tensor) else X_new
-        
-        # Normalize inputs
-        if self.normalize_data:
-            X_new_normalized = (X_new - self.X_mean) / self.X_std
-        else:
-            X_new_normalized = X_new
-            
-        if acquisition_type == 'variance':
-            # Simply use total predictive variance
-            with torch.no_grad(), gpytorch.settings.fast_pred_var():
-                predictions = self.likelihood(self.model(X_new_normalized))
-                variance = predictions.variance
-                total_variance = variance.sum(dim=1)  # Sum over all properties
-            
-            return total_variance
-            
-        elif acquisition_type == 'ivr':
-            # Integrated variance reduction (more complex, requires fantasy models)
-            X_grid_normalized = X_new_normalized
-            
-            # Current predictive variance at all grid points
-            with torch.no_grad(), gpytorch.settings.fast_pred_var():
-                predictions = self.likelihood(self.model(X_grid_normalized))
-                current_var = predictions.variance.sum(dim=1)
-            
-            total_ivr = torch.zeros(X_new_normalized.shape[0])
-            
-            # For each candidate, calculate expected variance reduction
-            for i in range(X_new_normalized.shape[0]):
-                # Create fantasy model
-                fantasy_model = self.model.get_fantasy_model(
-                    X_new_normalized[i:i+1], 
-                    self.likelihood(self.model(X_new_normalized[i:i+1])).mean
-                )
-                
-                # Compute posterior variance with fantasy observation
-                with torch.no_grad(), gpytorch.settings.fast_pred_var():
-                    fantasy_var = self.likelihood(fantasy_model(X_grid_normalized)).variance.sum(dim=1)
-                
-                # Integrated variance reduction
-                total_ivr[i] = (current_var - fantasy_var).sum()
-            
-            return total_ivr
-            
-        elif acquisition_type == 'ei':
-            # Expected improvement targets high property values (for property 0 by default)
-            best_f = torch.max(self.Y[:, 0])
-            
-            with torch.no_grad():
-                # Get predictive mean and variance
-                predictions = self.likelihood(self.model(X_new_normalized))
-                mean = predictions.mean[:, 0]  # For first property
-                variance = predictions.variance[:, 0]
-                std = torch.sqrt(variance)
-                
-                # If normalized, denormalize for comparison with best_f
-                if self.normalize_data:
-                    mean = mean * self.Y_std[0] + self.Y_mean[0]
-                    std = std * self.Y_std[0]
-                
-                # Calculate improvement
-                improvement = mean - best_f
-                z = improvement / std
-                
-                # EI formula
-                ei = improvement * torch.distributions.Normal(0, 1).cdf(z) + \
-                     std * torch.distributions.Normal(0, 1).log_prob(z).exp()
-                
-                # Set EI to 0 where std is 0
-                ei[std == 0] = 0.0
-            
-            return ei
-        
-        else:
-            raise ValueError(f"Unsupported acquisition type: {acquisition_type}")
-    
-    def select_next_well(self, X_candidates, acquisition_type='variance'):
-        """
-        Select the next well location from candidate points.
-        
-        Args:
-            X_candidates: Candidate points [n_candidates, input_dim]
-            acquisition_type: Type of acquisition function
-            
-        Returns:
-            best_point: Best candidate point [1, input_dim]
-            acq_value: Acquisition value at the best point
-        """
-        # Calculate acquisition function
-        acq_values = self.calculate_acquisition(X_candidates, acquisition_type)
-        
-        # Find the best candidate
-        best_idx = torch.argmax(acq_values)
-        best_point = X_candidates[best_idx:best_idx+1]
-        best_acq_value = acq_values[best_idx]
-        
-        return best_point, best_acq_value
-    
-    def add_observation(self, X_new, Y_new, refit=True):
-        """
-        Add a new observation and optionally refit the model.
-        
-        Args:
-            X_new: New observation location [1, input_dim]
-            Y_new: New observation values [1, n_outputs]
-            refit: Whether to refit the model after adding the observation
-            
-        Returns:
-            self
-        """
-        X_new = torch.tensor(X_new, dtype=torch.float32) if not isinstance(X_new, torch.Tensor) else X_new
-        Y_new = torch.tensor(Y_new, dtype=torch.float32) if not isinstance(Y_new, torch.Tensor) else Y_new
-        
-        # Update dataset
-        self.X = torch.cat([self.X, X_new], dim=0)
-        self.Y = torch.cat([self.Y, Y_new], dim=0)
-        
-        # Refit model if requested
-        if refit:
-            self.fit(self.X, self.Y, verbose=False)
-        
-        return self
-    
-    def sequential_design(self, 
-                         grid, 
-                         n_wells, 
-                         true_functions, 
-                         noise_std=0.01, 
-                         acquisition_type='variance',
-                         plot=True):
-        """
-        Sequentially design an exploration campaign.
-        
-        Args:
-            grid: Grid of candidate points [n_grid_points, input_dim]
-            n_wells: Number of new wells to design
-            true_functions: List of callables that return the true property values
-            noise_std: Standard deviation of measurement noise
-            acquisition_type: Type of acquisition function
-            plot: Whether to plot the results at each step
-            
-        Returns:
-            X_selected: Selected well locations [n_wells, input_dim]
-            Y_selected: Property values at selected locations [n_wells, n_outputs]
+            mean: Predicted means [n_points, n_properties]
+            std: Predicted standard deviations [n_points, n_properties]
         """
         grid = torch.tensor(grid, dtype=torch.float32) if not isinstance(grid, torch.Tensor) else grid
         
-        # Create figure for plotting
+        # Make predictions
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            predictions = self.likelihood(self.model(grid))
+            mean = predictions.mean
+            variance = predictions.variance
+            std = torch.sqrt(variance)
+        
+        return mean, std
+        
+    def plan_next_well(self, grid, strategy='uncertainty', economic_params=None):
+        """
+        Plan the next exploration well.
+        
+        Args:
+            grid: Grid of candidate locations [n_points, 2]
+            strategy: Strategy for well selection:
+                - 'uncertainty': Maximum total uncertainty
+                - 'ei': Expected improvement for property 0
+                - 'economic': Maximum expected economic value
+            economic_params: Economic parameters for value calculation
+                
+        Returns:
+            best_location: Best location for next well [2]
+            score: Score at the best location
+            score_grid: Score across the entire grid
+        """
+        grid = torch.tensor(grid, dtype=torch.float32) if not isinstance(grid, torch.Tensor) else grid
+        
+        # Get predictions
+        mean, std = self.predict(grid)
+        
+        if strategy == 'uncertainty':
+            # Total uncertainty across all properties
+            total_uncertainty = torch.sum(std, dim=1)
+            best_idx = torch.argmax(total_uncertainty)
+            best_location = grid[best_idx]
+            best_score = total_uncertainty[best_idx]
+            score_grid = total_uncertainty
+            
+        elif strategy == 'ei':
+            # Expected improvement for first property (e.g., porosity)
+            # Get best observed value so far
+            observed_values = np.array([well['measurements'][0] for well in self.wells 
+                                       if well['mask'][0]])
+            
+            if len(observed_values) == 0:
+                # If no observations yet, fall back to uncertainty
+                return self.plan_next_well(grid, strategy='uncertainty')
+                
+            best_f = torch.tensor(np.max(observed_values), dtype=torch.float32)
+            
+            # Calculate improvement
+            improvement = mean[:, 0] - best_f
+            
+            # Calculate z-score
+            z = improvement / std[:, 0]
+            
+            # Expected improvement
+            norm_dist = torch.distributions.Normal(0, 1)
+            ei = improvement * norm_dist.cdf(z) + std[:, 0] * torch.exp(norm_dist.log_prob(z))
+            
+            # Find best location
+            best_idx = torch.argmax(ei)
+            best_location = grid[best_idx]
+            best_score = ei[best_idx]
+            score_grid = ei
+            
+        elif strategy == 'economic':
+            if economic_params is None:
+                raise ValueError("Economic parameters required for 'economic' strategy")
+                
+            # Calculate expected monetary value at each location
+            emv = self._calculate_economic_value(grid, mean, std, economic_params)
+            
+            # Find best location
+            best_idx = torch.argmax(emv)
+            best_location = grid[best_idx]
+            best_score = emv[best_idx]
+            score_grid = emv
+            
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
+            
+        return best_location, best_score, score_grid
+        
+    def _calculate_economic_value(self, locations, mean, std, params):
+        """
+        Calculate expected monetary value at given locations.
+        
+        Args:
+            locations: Locations to evaluate [n_points, 2]
+            mean: Predicted means [n_points, n_properties]
+            std: Predicted standard deviations [n_points, n_properties]
+            params: Economic parameters
+                
+        Returns:
+            emv: Expected monetary value [n_points]
+        """
+        # For simplicity, assuming:
+        # Property 0: Porosity (fraction)
+        # Property 1: Permeability (mD)
+        # Property 2: Thickness (m)
+        
+        # Extract predictions
+        porosity = mean[:, 0]
+        permeability = mean[:, 1]
+        thickness = mean[:, 2] if self.n_properties > 2 else torch.ones_like(porosity) * params.get('default_thickness', 50)
+        
+        # Extract uncertainties
+        porosity_std = std[:, 0]
+        permeability_std = std[:, 1]
+        thickness_std = std[:, 2] if self.n_properties > 2 else torch.zeros_like(porosity)
+        
+        # Calculate hydrocarbon volume
+        area = params.get('area', 1.0e6)  # m²
+        hydrocarbon_saturation = 1.0 - params.get('water_saturation', 0.3)
+        formation_volume_factor = params.get('formation_volume_factor', 1.1)
+        
+        # Original oil in place (m³)
+        ooip = area * thickness * porosity * hydrocarbon_saturation / formation_volume_factor
+        
+        # Recovery factor based on permeability
+        recovery_factor = 0.1 + 0.2 * torch.log10(torch.clamp(permeability, min=1.0) / 100)
+        recovery_factor = torch.clamp(recovery_factor, 0.05, 0.6)
+        
+        # Recoverable oil (m³)
+        recoverable_oil = ooip * recovery_factor
+        
+        # Convert to barrels
+        barrels = recoverable_oil * 6.29
+        
+        # Revenue
+        oil_price = params.get('oil_price', 70)  # $ per barrel
+        revenue = barrels * oil_price
+        
+        # Cost
+        base_cost = params.get('drilling_cost', 1e7) + params.get('completion_cost', 5e6)
+        
+        # Expected monetary value
+        emv = revenue - base_cost
+        
+        # Apply risk adjustment based on uncertainty
+        # Higher uncertainty means higher risk, which reduces EMV
+        uncertainty_factor = 1.0 - torch.clamp(
+            (porosity_std / porosity + permeability_std / permeability) / 2, 0, 0.5
+        )
+        risk_adjusted_emv = emv * uncertainty_factor
+        
+        return risk_adjusted_emv
+        
+    def sequential_exploration(self, grid, n_wells, true_functions, noise_std=0.01, 
+                              strategy='uncertainty', economic_params=None, plot=True):
+        """
+        Sequentially plan and drill exploration wells.
+        
+        Args:
+            grid: Grid of candidate locations [n_points, 2]
+            n_wells: Number of wells to drill
+            true_functions: List of functions that return true property values
+            noise_std: Measurement noise standard deviation
+            strategy: Well planning strategy
+            economic_params: Economic parameters for 'economic' strategy
+            plot: Whether to plot results
+            
+        Returns:
+            history: List of exploration steps
+        """
+        grid = torch.tensor(grid, dtype=torch.float32) if not isinstance(grid, torch.Tensor) else grid
+        
+        # Setup visualization if plotting
         if plot:
-            n_cols = self.n_outputs + 2  # Properties + uncertainty + acquisition
+            n_cols = self.n_properties + 2  # Properties + uncertainty + strategy
             fig, axes = plt.subplots(n_wells, n_cols, figsize=(n_cols * 4, n_wells * 4))
             if n_wells == 1:
                 axes = axes.reshape(1, -1)
-        
-        X_selected = []
-        Y_selected = []
-        
-        # Get grid shape for plotting
-        grid_shape = None
-        if plot and grid.shape[1] == 2:
-            # Try to determine grid shape for 2D plots
-            unique_x = torch.unique(grid[:, 0]).shape[0]
-            unique_y = torch.unique(grid[:, 1]).shape[0]
-            if unique_x * unique_y == grid.shape[0]:
-                grid_shape = (unique_y, unique_x)
-        
-        for i in range(n_wells):
-            # Calculate acquisition function
-            acq_values = self.calculate_acquisition(grid, acquisition_type)
-            
-            # Select the best point
-            best_idx = torch.argmax(acq_values)
-            best_point = grid[best_idx:best_idx+1]
-            
-            # "Drill" the well (evaluate true functions with noise)
-            best_values = []
-            for func in true_functions:
-                if callable(func):
-                    value = func(best_point)
-                    if isinstance(value, torch.Tensor):
-                        value = value + torch.randn(1) * noise_std
-                    else:
-                        value = torch.tensor([value + np.random.normal(0, noise_std)], dtype=torch.float32)
-                    best_values.append(value)
-            
-            best_values = torch.cat(best_values, dim=0).reshape(1, -1)
-            
-            # Store selected point and values
-            X_selected.append(best_point)
-            Y_selected.append(best_values)
-            
-            # Add observation and update model
-            self.add_observation(best_point, best_values)
-            
-            # Make predictions on the grid
-            mean, variance = self.predict(grid)
-            
-            # Plot results
-            if plot:
-                if grid.shape[1] == 2 and grid_shape is not None:
+                
+            # Determine grid shape for 2D plotting
+            grid_shape = None
+            if grid.shape[1] == 2:
+                unique_x = torch.unique(grid[:, 0]).shape[0]
+                unique_y = torch.unique(grid[:, 1]).shape[0]
+                if unique_x * unique_y == grid.shape[0]:
+                    grid_shape = (unique_y, unique_x)
                     x1_unique = torch.unique(grid[:, 0])
                     x2_unique = torch.unique(grid[:, 1])
                     x1_grid, x2_grid = torch.meshgrid(x1_unique, x2_unique, indexing='ij')
-                    
-                    # Plot each property
-                    for j in range(self.n_outputs):
-                        mean_grid = mean[:, j].reshape(grid_shape)
-                        ax = axes[i, j]
-                        im = ax.contourf(x1_grid.numpy(), x2_grid.numpy(), mean_grid.numpy(), 
-                                       levels=20, cmap='viridis')
-                        plt.colorbar(im, ax=ax)
-                        ax.scatter(self.X[:-1, 0].numpy(), self.X[:-1, 1].numpy(), 
-                                 color='red', s=30, marker='x')
-                        ax.scatter(best_point[:, 0].numpy(), best_point[:, 1].numpy(), 
-                                 color='green', s=80, marker='o')
-                        ax.set_title(f'Well #{i+1}: Property {j+1}')
-                        
-                    # Plot combined uncertainty
-                    total_var = torch.sum(variance, dim=1).reshape(grid_shape)
-                    ax = axes[i, self.n_outputs]
-                    im = ax.contourf(x1_grid.numpy(), x2_grid.numpy(), total_var.numpy(), 
-                                   levels=20, cmap='cividis')
+        
+        # Record exploration history
+        history = []
+        
+        for i in range(n_wells):
+            # Fit model to current data
+            self.fit(verbose=(i==0))
+            
+            # Plan next well
+            next_location, score, score_grid = self.plan_next_well(
+                grid, strategy=strategy, economic_params=economic_params
+            )
+            
+            # "Drill" the well (evaluate true functions with noise)
+            measurements = {}
+            for j, func in enumerate(true_functions):
+                if callable(func):
+                    value = func(next_location.reshape(1, -1))
+                    if isinstance(value, torch.Tensor):
+                        value = value.item() + np.random.normal(0, noise_std)
+                    else:
+                        value = value + np.random.normal(0, noise_std)
+                    measurements[self.properties[j]] = value
+            
+            # Add the well to our dataset
+            self.add_well(next_location.numpy(), measurements, well_name=f"Well_{len(self.wells) + 1}")
+            
+            # Record this step
+            step_info = {
+                'well_location': next_location.numpy(),
+                'measurements': measurements,
+                'score': score.item(),
+                'strategy': strategy
+            }
+            history.append(step_info)
+            
+            # Plot results
+            if plot and grid_shape is not None:
+                # Make predictions with updated model
+                self.fit(verbose=False)
+                mean, std = self.predict(grid)
+                
+                # Reshape for plotting
+                mean_reshaped = [mean[:, j].reshape(grid_shape).numpy() for j in range(self.n_properties)]
+                std_reshaped = [std[:, j].reshape(grid_shape).numpy() for j in range(self.n_properties)]
+                
+                # Get well locations
+                well_x = np.array([well['location'][0] for well in self.wells])
+                well_y = np.array([well['location'][1] for well in self.wells])
+                
+                # Plot each property
+                for j in range(self.n_properties):
+                    ax = axes[i, j]
+                    im = ax.contourf(x1_grid.numpy(), x2_grid.numpy(), mean_reshaped[j], levels=20, cmap='viridis')
                     plt.colorbar(im, ax=ax)
-                    ax.scatter(self.X[:-1, 0].numpy(), self.X[:-1, 1].numpy(), 
-                             color='red', s=30, marker='x')
-                    ax.scatter(best_point[:, 0].numpy(), best_point[:, 1].numpy(), 
-                             color='green', s=80, marker='o')
-                    ax.set_title(f'Well #{i+1}: Uncertainty')
+                    ax.scatter(well_x[:-1], well_y[:-1], color='red', s=30, marker='x')
+                    ax.scatter(well_x[-1], well_y[-1], color='green', s=80, marker='o')
+                    ax.set_title(f'Well #{i+1}: {self.properties[j].capitalize()}')
                     
-                    # Plot acquisition function
-                    acq_grid = acq_values.reshape(grid_shape)
-                    ax = axes[i, self.n_outputs + 1]
-                    im = ax.contourf(x1_grid.numpy(), x2_grid.numpy(), acq_grid.numpy(), 
-                                   levels=20, cmap='plasma')
-                    plt.colorbar(im, ax=ax)
-                    ax.scatter(self.X[:-1, 0].numpy(), self.X[:-1, 1].numpy(), 
-                             color='red', s=30, marker='x')
-                    ax.scatter(best_point[:, 0].numpy(), best_point[:, 1].numpy(), 
-                             color='green', s=80, marker='o')
-                    ax.set_title(f'Well #{i+1}: Acquisition')
+                # Plot combined uncertainty
+                total_std = torch.sum(std, dim=1).reshape(grid_shape).numpy()
+                ax = axes[i, self.n_properties]
+                im = ax.contourf(x1_grid.numpy(), x2_grid.numpy(), total_std, levels=20, cmap='cividis')
+                plt.colorbar(im, ax=ax)
+                ax.scatter(well_x[:-1], well_y[:-1], color='red', s=30, marker='x')
+                ax.scatter(well_x[-1], well_y[-1], color='green', s=80, marker='o')
+                ax.set_title(f'Well #{i+1}: Uncertainty')
+                
+                # Plot acquisition function
+                ax = axes[i, self.n_properties + 1]
+                score_reshaped = score_grid.reshape(grid_shape).numpy()
+                im = ax.contourf(x1_grid.numpy(), x2_grid.numpy(), score_reshaped, levels=20, cmap='plasma')
+                plt.colorbar(im, ax=ax)
+                ax.scatter(well_x[:-1], well_y[:-1], color='red', s=30, marker='x')
+                ax.scatter(well_x[-1], well_y[-1], color='green', s=80, marker='o')
+                ax.set_title(f'Well #{i+1}: {strategy.capitalize()} Score')
         
         if plot:
             plt.tight_layout()
             plt.show()
-        
-        # Concatenate all selected points and values
-        X_selected = torch.cat(X_selected, dim=0)
-        Y_selected = torch.cat(Y_selected, dim=0)
-        
-        return X_selected, Y_selected
+                
+        return history
+
+
+
+# Create synthetic basin example
+basin_size = (20, 20)  # 20 km x 20 km basin
+resolution = 30  # Grid resolution
+
+# Create grid of points
+x1 = np.linspace(0, basin_size[0], resolution)
+x2 = np.linspace(0, basin_size[1], resolution)
+x1_grid, x2_grid = np.meshgrid(x1, x2)
+grid = np.column_stack([x1_grid.flatten(), x2_grid.flatten()])
+grid_tensor = torch.tensor(grid, dtype=torch.float32)
+
+# Define true geological functions (unknown in real life, but defined here for simulation)
+def true_porosity(x):
+    """True porosity function with multiple sweet spots."""
+    x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
     
-    def evaluate_model(self, X_test, Y_test):
-        """
-        Evaluate model performance against test data.
-        
-        Args:
-            X_test: Test input locations [n_test, input_dim]
-            Y_test: True property values [n_test, n_outputs]
-            
-        Returns:
-            metrics: Dictionary of evaluation metrics
-        """
-        X_test = torch.tensor(X_test, dtype=torch.float32) if not isinstance(X_test, torch.Tensor) else X_test
-        Y_test = torch.tensor(Y_test, dtype=torch.float32) if not isinstance(Y_test, torch.Tensor) else Y_test
-        
-        # Make predictions
-        mean, variance = self.predict(X_test)
-        
-        # Calculate metrics
-        metrics = {}
-        
-        # Error metrics per property
-        for j in range(self.n_outputs):
-            # Mean Absolute Error
-            mae = torch.mean(torch.abs(mean[:, j] - Y_test[:, j])).item()
-            metrics[f'MAE_property_{j}'] = mae
-            
-            # Root Mean Squared Error
-            rmse = torch.sqrt(torch.mean((mean[:, j] - Y_test[:, j])**2)).item()
-            metrics[f'RMSE_property_{j}'] = rmse
-            
-            # Standardized log loss (negative log likelihood under Gaussian assumptions)
-            std = torch.sqrt(variance[:, j])
-            nll = 0.5 * torch.mean(((mean[:, j] - Y_test[:, j]) / std)**2 + torch.log(2 * np.pi * variance[:, j])).item()
-            metrics[f'NLL_property_{j}'] = nll
-            
-            # Calculate proportion of test points within confidence intervals
-            z_scores = torch.abs((mean[:, j] - Y_test[:, j]) / std)
-            coverage_68 = torch.mean((z_scores <= 1.0).float()).item()
-            coverage_95 = torch.mean((z_scores <= 2.0).float()).item()
-            metrics[f'68%_Coverage_property_{j}'] = coverage_68
-            metrics[f'95%_Coverage_property_{j}'] = coverage_95
-        
-        return metrics
+    # Major sweet spot
+    spot1 = 0.25 * torch.exp(-0.1 * ((x_tensor[:, 0] - 5)**2 + (x_tensor[:, 1] - 15)**2))
     
-    def plot_model_diagnostics(self, X_test, Y_test):
-        """
-        Plot comprehensive model diagnostics.
-        
-        Args:
-            X_test: Test input locations [n_test, input_dim]
-            Y_test: True property values [n_test, n_outputs]
-        """
-        X_test = torch.tensor(X_test, dtype=torch.float32) if not isinstance(X_test, torch.Tensor) else X_test
-        Y_test = torch.tensor(Y_test, dtype=torch.float32) if not isinstance(Y_test, torch.Tensor) else Y_test
-        
-        # Make predictions
-        mean, variance = self.predict(X_test)
-        std = torch.sqrt(variance)
-        
-        # Create figure
-        n_rows = self.n_outputs
-        fig, axes = plt.subplots(n_rows, 3, figsize=(15, 5 * n_rows))
-        if n_rows == 1:
-            axes = axes.reshape(1, -1)
-        
-        for j in range(self.n_outputs):
-            # 1. Actual vs Predicted plot
-            ax = axes[j, 0]
-            ax.scatter(Y_test[:, j].numpy(), mean[:, j].numpy(), alpha=0.7)
-            
-            # Add perfect prediction line
-            min_val = min(Y_test[:, j].min().item(), mean[:, j].min().item())
-            max_val = max(Y_test[:, j].max().item(), mean[:, j].max().item())
-            ax.plot([min_val, max_val], [min_val, max_val], 'k--')
-            
-            ax.set_xlabel('True Value')
-            ax.set_ylabel('Predicted Value')
-            ax.set_title(f'Property {j+1}: Actual vs Predicted')
-            
-            # 2. Standardized residuals histogram
-            ax = axes[j, 1]
-            z_scores = ((mean[:, j] - Y_test[:, j]) / std[:, j]).numpy()
-            ax.hist(z_scores, bins=30, alpha=0.7)
-            
-            # Add reference lines
-            ax.axvline(x=-2, color='r', linestyle='--')
-            ax.axvline(x=2, color='r', linestyle='--')
-            
-            ax.set_xlabel('Standardized Residual')
-            ax.set_ylabel('Count')
-            ax.set_title(f'Property {j+1}: Standardized Residuals')
-            
-            # 3. Uncertainty calibration plot
-            ax = axes[j, 2]
-            
-            # Calculate quantiles for calibration
-            quantiles = np.linspace(0, 1, 11)  # 0, 0.1, 0.2, ..., 1.0
-            emp_quantiles = []
-            
-            for q in quantiles:
-                if q == 0:
-                    emp_quantiles.append(0)
-                elif q == 1:
-                    emp_quantiles.append(1)
-                else:
-                    # Theoretical: |prediction - true| / std < norm.ppf(q)
-                    threshold = torch.distributions.Normal(0, 1).icdf(torch.tensor(0.5 + q/2))
-                    emp_quantiles.append(torch.mean((torch.abs(z_scores) <= threshold).float()).item())
-            
-            # Plot calibration curve
-            ax.plot(quantiles, emp_quantiles, 'bo-')
-            ax.plot([0, 1], [0, 1], 'k--')  # Perfect calibration line
-            
-            ax.set_xlabel('Theoretical Quantile')
-            ax.set_ylabel('Empirical Quantile')
-            ax.set_title(f'Property {j+1}: Uncertainty Calibration')
-        
-        plt.tight_layout()
-        plt.show()
+    # Secondary sweet spot
+    spot2 = 0.2 * torch.exp(-0.15 * ((x_tensor[:, 0] - 15)**2 + (x_tensor[:, 1] - 8)**2))
+    
+    # Background trend (increasing toward the north-east)
+    trend = 0.05 + 0.1 * (x_tensor[:, 0] / basin_size[0] + x_tensor[:, 1] / basin_size[1]) / 2
+    
+    return spot1 + spot2 + trend
+
+def true_permeability(x):
+    """Permeability linked to porosity but with its own spatial patterns."""
+    x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
+    
+    # Get porosity (main driver)
+    porosity = true_porosity(x_tensor)
+    
+    # Additional spatial variation
+    fault_effect = 500 * torch.exp(-0.2 * (x_tensor[:, 0] - 10)**2 / 4)
+    
+    # Convert from porosity (typical log-linear relationship)
+    perm_base = 10**(porosity * 15 - 1)  # Typical transform
+    
+    return perm_base + fault_effect
+
+def true_thickness(x):
+    """Reservoir thickness with structural trends."""
+    x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
+    
+    # Main structural high
+    structure = 40 * torch.exp(-0.05 * ((x_tensor[:, 0] - 10)**2 + (x_tensor[:, 1] - 10)**2))
+    
+    # Basin deepening trend toward the south
+    trend = 30 * (1 - x_tensor[:, 1] / basin_size[1])
+    
+    return structure + trend + 20  # Add baseline thickness
+
+# Calculate true values for visualization
+true_porosity_grid = true_porosity(grid_tensor).reshape(resolution, resolution).numpy()
+true_permeability_grid = true_permeability(grid_tensor).reshape(resolution, resolution).numpy()
+true_thickness_grid = true_thickness(grid_tensor).reshape(resolution, resolution).numpy()
+
+# Visualize true geology
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+im0 = axes[0].contourf(x1_grid, x2_grid, true_porosity_grid, levels=20, cmap='viridis')
+axes[0].set_title('True Porosity')
+axes[0].set_xlabel('X (km)')
+axes[0].set_ylabel('Y (km)')
+plt.colorbar(im0, ax=axes[0])
+
+im1 = axes[1].contourf(x1_grid, x2_grid, true_permeability_grid, levels=20, cmap='plasma')
+axes[1].set_title('True Permeability (mD)')
+axes[1].set_xlabel('X (km)')
+axes[1].set_ylabel('Y (km)')
+plt.colorbar(im1, ax=axes[1])
+
+im2 = axes[2].contourf(x1_grid, x2_grid, true_thickness_grid, levels=20, cmap='cividis')
+axes[2].set_title('True Thickness (m)')
+axes[2].set_xlabel('X (km)')
+axes[2].set_ylabel('Y (km)')
+plt.colorbar(im2, ax=axes[2])
+
+plt.tight_layout()
+plt.show()
+
+# Initialize the exploration framework
+basin_gp = BasinExplorationGP(
+    basin_size=basin_size,
+    properties=['porosity', 'permeability', 'thickness']
+)
+
+# Add initial wells (random exploration at first)
+np.random.seed(42)
+n_initial_wells = 3
+
+for i in range(n_initial_wells):
+    location = np.random.uniform(0, basin_size, size=2)
+    
+    # Measure properties with noise
+    #porosity = true_porosity(torch.tensor([location], dtype=torch.float32)).item() + np.random.normal(0, 0.01)
+    location_np = np.array([location])
+    porosity = true_porosity(torch.tensor(location_np, dtype=torch.float32)).item() + np.random.normal(0, 0.01)
+    permeability = true_permeability(torch.tensor([location], dtype=torch.float32)).item() + np.random.normal(0, 50)
+    thickness = true_thickness(torch.tensor([location], dtype=torch.float32)).item() + np.random.normal(0, 2)
+    
+    measurements = {
+        'porosity': porosity,
+        'permeability': permeability,
+        'thickness': thickness
+    }
+    
+    basin_gp.add_well(location, measurements, well_name=f"Initial_Well_{i+1}")
+
+print(f"Added {n_initial_wells} initial wells")
+
+# Define economic parameters for exploration planning
+economic_params = {
+    'area': 1.0e6,  # m²
+    'water_saturation': 0.3,
+    'formation_volume_factor': 1.1,
+    'oil_price': 80,  # $ per barrel
+    'drilling_cost': 8e6,  # $
+    'completion_cost': 4e6  # $
+}
+
+# Run sequential exploration with different strategies
+n_exploration_wells = 5
+
+# 1. Uncertainty-based strategy
+print("\nRunning uncertainty-based exploration...")
+uncertainty_history = basin_gp.sequential_exploration(
+    grid_tensor,
+    n_exploration_wells,
+    [true_porosity, true_permeability, true_thickness],
+    noise_std=0.01,
+    strategy='uncertainty',
+    plot=True
+)
+
+# Reset and try economic-based strategy
+basin_gp = BasinExplorationGP(
+    basin_size=basin_size,
+    properties=['porosity', 'permeability', 'thickness']
+)
+
+# Re-add initial wells
+for i in range(n_initial_wells):
+    location = np.random.uniform(0, basin_size, size=2)
+    
+    # Convert to tensor properly
+    location_tensor = torch.tensor(location.reshape(1, -1), dtype=torch.float32)
+    
+    # Measure properties with noise
+    porosity = true_porosity(location_tensor).item() + np.random.normal(0, 0.01)
+    permeability = true_permeability(location_tensor).item() + np.random.normal(0, 50)
+    thickness = true_thickness(location_tensor).item() + np.random.normal(0, 2)
+    
+    measurements = {
+        'porosity': porosity,
+        'permeability': permeability,
+        'thickness': thickness
+    }
+    
+    basin_gp.add_well(location, measurements, well_name=f"Initial_Well_{i+1}")
+
+# 2. Economic-based strategy
+print("\nRunning economic-based exploration...")
+economic_history = basin_gp.sequential_exploration(
+    grid_tensor,
+    n_exploration_wells,
+    [true_porosity, true_permeability, true_thickness],
+    noise_std=0.01,
+    strategy='economic',
+    economic_params=economic_params,
+    plot=True
+)
+
+# Compare final models from both strategies
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+# Get final predictions from uncertainty-based strategy
+basin_gp.fit(verbose=False)
+mean_uncertainty, std_uncertainty = basin_gp.predict(grid_tensor)
+
+# Get well locations
+well_x = np.array([well['location'][0] for well in basin_gp.wells])
+well_y = np.array([well['location'][1] for well in basin_gp.wells])
+
+# Reshape for plotting
+mean_porosity = mean_uncertainty[:, 0].reshape(resolution, resolution).numpy()
+mean_permeability = mean_uncertainty[:, 1].reshape(resolution, resolution).numpy()
+mean_thickness = mean_uncertainty[:, 2].reshape(resolution, resolution).numpy()
+
+# Plot uncertainty-based results
+im0 = axes[0, 0].contourf(x1_grid, x2_grid, mean_porosity, levels=20, cmap='viridis')
+axes[0, 0].scatter(well_x, well_y, color='red', s=30, marker='x')
+axes[0, 0].set_title('Economic Strategy: Porosity')
+plt.colorbar(im0, ax=axes[0, 0])
+
+im1 = axes[0, 1].contourf(x1_grid, x2_grid, mean_permeability, levels=20, cmap='plasma')
+axes[0, 1].scatter(well_x, well_y, color='red', s=30, marker='x')
+axes[0, 1].set_title('Economic Strategy: Permeability')
+plt.colorbar(im1, ax=axes[0, 1])
+
+im2 = axes[0, 2].contourf(x1_grid, x2_grid, mean_thickness, levels=20, cmap='cividis')
+axes[0, 2].scatter(well_x, well_y, color='red', s=30, marker='x')
+axes[0, 2].set_title('Economic Strategy: Thickness')
+plt.colorbar(im2, ax=axes[0, 2])
+
+# Compare with true geology
+im3 = axes[1, 0].contourf(x1_grid, x2_grid, true_porosity_grid, levels=20, cmap='viridis')
+axes[1, 0].set_title('True Porosity')
+plt.colorbar(im3, ax=axes[1, 0])
+
+im4 = axes[1, 1].contourf(x1_grid, x2_grid, true_permeability_grid, levels=20, cmap='plasma')
+axes[1, 1].set_title('True Permeability')
+plt.colorbar(im4, ax=axes[1, 1])
+
+im5 = axes[1, 2].contourf(x1_grid, x2_grid, true_thickness_grid, levels=20, cmap='cividis')
+axes[1, 2].set_title('True Thickness')
+plt.colorbar(im5, ax=axes[1, 2])
+
+plt.tight_layout()
+plt.show()
+
+# Calculate estimated recoverable resources
+def calculate_resources(mean_predictions, grid_size, basin_size):
+    """Calculate total recoverable resources based on predictions."""
+    # Extract predictions
+    porosity = mean_predictions[:, 0]
+    permeability = mean_predictions[:, 1]
+    thickness = mean_predictions[:, 2]
+    
+    # Calculate cell area
+    cell_area = (basin_size[0] / (resolution-1)) * (basin_size[1] / (resolution-1)) * 1e6  # m²
+    
+    # Original oil in place
+    hydrocarbon_saturation = 1.0 - 0.3  # 1 - water saturation
+    formation_volume_factor = 1.1
+    ooip = cell_area * thickness * porosity * hydrocarbon_saturation / formation_volume_factor
+    
+    # Recovery factor
+    recovery_factor = 0.1 + 0.2 * torch.log10(torch.clamp(permeability, min=1.0) / 100)
+    recovery_factor = torch.clamp(recovery_factor, 0.05, 0.6)
+    
+    # Recoverable oil
+    recoverable_oil = ooip * recovery_factor
+    
+    # Total recoverable (m³)
+    total_recoverable = torch.sum(recoverable_oil).item()
+    
+    # Convert to barrels
+    total_barrels = total_recoverable * 6.29
+    
+    return total_barrels
+
+# Calculate resources based on economic-based exploration
+total_resources = calculate_resources(mean_uncertainty, resolution, basin_size)
+print(f"\nEstimated total recoverable resources: {total_resources/1e6:.2f} million barrels")
+
+# Calculate economic value
+total_value = total_resources * economic_params['oil_price']
+total_cost = len(basin_gp.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
+net_value = total_value - total_cost
+
+print(f"Estimated total economic value: ${total_value/1e9:.2f} billion")
+print(f"Total exploration cost: ${total_cost/1e6:.2f} million")
+print(f"Net value: ${net_value/1e9:.2f} billion")
