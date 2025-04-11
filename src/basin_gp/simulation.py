@@ -107,6 +107,93 @@ def visualize_true_geology(basin_size=(20, 20), resolution=30):
     
     return grid_tensor, x1_grid, x2_grid, true_porosity_grid, true_permeability_grid, true_thickness_grid
 
+def add_knowledge_driven_wells(basin_gp, n_wells, basin_size, 
+                              prior_functions, uncertainty_weight=0.5,
+                              seed=42):
+    """
+    Add initial wells based on prior knowledge and exploration strategy.
+    
+    Args:
+        basin_gp: BasinExplorationGP model
+        n_wells: Number of wells to add
+        basin_size: Basin size in (x, y) km
+        prior_functions: List of prior belief functions for each property
+        uncertainty_weight: Weight for balancing high-value vs. high-uncertainty areas
+                           (0 = pure value, 1 = pure uncertainty)
+        seed: Random seed for sampling
+    """
+    np.random.seed(seed)
+    
+    # Create a grid to evaluate our prior beliefs
+    resolution = 30
+    x1 = np.linspace(0, basin_size[0], resolution)
+    x2 = np.linspace(0, basin_size[1], resolution)
+    x1_grid, x2_grid = np.meshgrid(x1, x2)
+    grid = np.column_stack([x1_grid.flatten(), x2_grid.flatten()])
+    grid_tensor = torch.tensor(grid, dtype=torch.float32)
+    
+    # Evaluate our prior beliefs on the grid
+    prior_values = []
+    for func in prior_functions:
+        values = func(grid_tensor).reshape(resolution, resolution).numpy()
+        prior_values.append(values)
+    
+    # We'll place wells strategically:
+    # 1. One well in the location with highest expected value according to our prior
+    # 2. One well to test a different area with high uncertainty
+    # 3. One well in an area that balances value and uncertainty
+    
+    locations = []
+    
+    # Well 1: Highest expected value (use porosity * thickness as proxy for value)
+    value_proxy = prior_values[0] * prior_values[2]  # porosity * thickness
+    max_idx = np.argmax(value_proxy.flatten())
+    locations.append([x1_grid.flatten()[max_idx], x2_grid.flatten()[max_idx]])
+    
+    # Well 2: Maximize distance from first well (exploration)
+    distances = np.sqrt((grid[:, 0] - locations[0][0])**2 + 
+                       (grid[:, 1] - locations[0][1])**2)
+    max_dist_idx = np.argmax(distances)
+    locations.append([grid[max_dist_idx, 0], grid[max_dist_idx, 1]])
+    
+    # Remaining wells: Balance value and coverage
+    for i in range(2, n_wells):
+        # Calculate distances to existing wells
+        min_distances = np.ones(grid.shape[0]) * float('inf')
+        for loc in locations:
+            d = np.sqrt((grid[:, 0] - loc[0])**2 + (grid[:, 1] - loc[1])**2)
+            min_distances = np.minimum(min_distances, d)
+        
+        # Normalize distance and value
+        norm_dist = min_distances / np.max(min_distances)
+        norm_value = value_proxy.flatten() / np.max(value_proxy.flatten())
+        
+        # Score combines value and distance (uncertainty proxy)
+        score = (1 - uncertainty_weight) * norm_value + uncertainty_weight * norm_dist
+        next_idx = np.argmax(score)
+        locations.append([grid[next_idx, 0], grid[next_idx, 1]])
+    
+    # Add the wells to our model
+    for i, location in enumerate(locations):
+        # Convert to tensor properly - fix the reshape error
+        location_np = np.array(location).reshape(1, -1)
+        location_tensor = torch.tensor(location_np, dtype=torch.float32)
+        
+        # Measure properties with noise (from true functions)
+        porosity = true_porosity(location_tensor, basin_size).item() + np.random.normal(0, 0.01)
+        permeability = true_permeability(location_tensor, basin_size).item() + np.random.normal(0, 50)
+        thickness = true_thickness(location_tensor, basin_size).item() + np.random.normal(0, 2)
+        
+        measurements = {
+            'porosity': porosity,
+            'permeability': permeability,
+            'thickness': thickness
+        }
+        
+        basin_gp.add_well(location, measurements, well_name=f"Initial_Well_{i+1}")
+    
+    return basin_gp
+
 def add_random_wells(basin_gp, n_wells, basin_size, seed=42):
     """
     Add random initial wells to the basin model.
@@ -179,3 +266,42 @@ def calculate_resources(mean_predictions, resolution, basin_size):
     total_barrels = total_recoverable * 6.29
     
     return total_barrels
+
+def prior_porosity(x, basin_size=(20, 20)):
+    """Prior belief about porosity distribution."""
+    x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
+    
+    # We believe there's a sweet spot in the northeast
+    spot = 0.2 * torch.exp(-0.1 * ((x_tensor[:, 0] - 15)**2 + (x_tensor[:, 1] - 15)**2))
+    
+    # General trend of increasing porosity toward the east (due to deepening basin)
+    trend = 0.05 + 0.1 * (x_tensor[:, 0] / basin_size[0])
+    
+    return spot + trend
+
+def prior_permeability(x, basin_size=(20, 20)):
+    """Prior belief about permeability, correlated with porosity but with variations."""
+    x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
+    
+    # Permeability is related to our porosity belief
+    porosity_belief = prior_porosity(x_tensor, basin_size)
+    
+    # We believe there's a fault zone enhancing permeability in the central area
+    fault_effect = 300 * torch.exp(-0.2 * ((x_tensor[:, 0] - 10)**2) / 4)
+    
+    # Convert from porosity (typical log-linear relationship)
+    perm_base = 10**(porosity_belief * 15)
+    
+    return perm_base + fault_effect
+
+def prior_thickness(x, basin_size=(20, 20)):
+    """Prior belief about reservoir thickness."""
+    x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
+    
+    # We believe there's a structural high in the basin center
+    structure = 30 * torch.exp(-0.05 * ((x_tensor[:, 0] - 10)**2 + (x_tensor[:, 1] - 10)**2))
+    
+    # Basin deepens to the north
+    trend = 20 * (x_tensor[:, 1] / basin_size[1])
+    
+    return structure + trend + 15  # Add baseline thickness
