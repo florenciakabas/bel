@@ -23,6 +23,8 @@ def plan_next_well(model, grid, mean, std, strategy='uncertainty', economic_para
         return plan_next_well_ei(model, grid, mean, std)
     elif strategy == 'economic':
         return plan_next_well_economic(grid, mean, std, economic_params)
+    elif strategy == 'balance':
+        return plan_next_well_balance(grid, mean, std, economic_params)
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
@@ -182,3 +184,45 @@ def calculate_economic_value(locations, mean, std, params):
     risk_adjusted_emv = emv * uncertainty_factor
     
     return risk_adjusted_emv
+
+def plan_next_well_balance(grid, mean, std, economic_params, weight=0.5):
+    """
+    Plan next well based on a balance of uncertainty reduction and economic value.
+    This strategy handles the exploration-exploitation trade-off directly by combining
+    both objectives with an adjustable weight parameter.
+    
+    Args:
+        grid: Grid of candidate locations [n_points, 2]
+        mean: Mean predictions [n_points, n_properties]
+        std: Standard deviation predictions [n_points, n_properties]
+        economic_params: Parameters for economic calculations
+        weight: Weight between uncertainty (0) and economic value (1)
+                Default is 0.5 for an even balance
+        
+    Returns:
+        best_location, best_score, score_grid
+    """
+    if economic_params is None:
+        raise ValueError("Economic parameters required for 'balance' strategy")
+    
+    # Get uncertainty score (exploration)
+    _, _, uncertainty_score = plan_next_well_uncertainty(grid, mean, std)
+    
+    # Get economic score (exploitation)
+    _, _, economic_score = plan_next_well_economic(grid, mean, std, economic_params)
+    
+    # Normalize both scores to [0, 1] range to make them comparable
+    norm_uncertainty = (uncertainty_score - uncertainty_score.min()) / (uncertainty_score.max() - uncertainty_score.min() + 1e-10)
+    norm_economic = (economic_score - economic_score.min()) / (economic_score.max() - economic_score.min() + 1e-10)
+    
+    # Upper Confidence Bound (UCB) inspired approach:
+    # score = exploitation_term + exploration_weight * exploration_term
+    # where weight controls the exploration-exploitation trade-off
+    balance_score = weight * norm_economic + (1 - weight) * norm_uncertainty
+    
+    # Find best location
+    best_idx = torch.argmax(balance_score)
+    best_location = grid[best_idx]
+    best_score = balance_score[best_idx]
+    
+    return best_location, best_score, balance_score

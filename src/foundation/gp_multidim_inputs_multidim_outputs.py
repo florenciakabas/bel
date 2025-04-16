@@ -180,7 +180,7 @@ ax6.set_ylabel('Y coordinate')
 plt.colorbar(contour6, ax=ax6)
 
 plt.tight_layout()
-plt.show()
+plt.close()
 
 # Calculate cross-correlation
 with torch.no_grad():

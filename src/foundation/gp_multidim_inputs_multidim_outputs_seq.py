@@ -193,7 +193,7 @@ for well_idx in range(n_new_wells):
     Y_current = torch.cat([Y_current, next_observation], dim=0)
 
 plt.tight_layout()
-plt.show()
+plt.close()
 
 # Final model and predictions for evaluation
 # Normalize final data
@@ -287,7 +287,7 @@ axes[1, 2].set_title('Permeability Uncertainty')
 plt.colorbar(im6, ax=axes[1, 2])
 
 plt.tight_layout()
-plt.show()
+plt.close()
 
 # Extract and print learned correlations
 with torch.no_grad():
@@ -343,4 +343,4 @@ with torch.no_grad():
     plt.axvline(x=2, color='r', linestyle='--')
     
     plt.tight_layout()
-    plt.show()
+    plt.close()

@@ -132,4 +132,4 @@ styler.apply_style(ax, title=f'Gaussian Process Posterior, gp.fit optimized',
                     xlabel='Location', ylabel='Property Value')
 
 plt.ylim(-5, 5)  # Set y-axis limits
-plt.show()
+plt.close()

@@ -2,18 +2,20 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
-def create_basin_grid(basin_size, resolution):
+def create_basin_grid(basin_size, resolution, geojson_file=None):
     """
     Create a grid of points covering the basin.
     
     Args:
         basin_size: Size of the basin in (x, y) kilometers
         resolution: Number of points along each dimension
+        geojson_file: Optional path to a GeoJSON file defining the basin shape
         
     Returns:
         grid: Grid points [n_points, 2]
         x1_grid: x-coordinates meshgrid
         x2_grid: y-coordinates meshgrid
+        mask: Optional binary mask for non-rectangular regions (None if not using geojson)
     """
     # Create grid of points
     x1 = np.linspace(0, basin_size[0], resolution)
@@ -22,7 +24,39 @@ def create_basin_grid(basin_size, resolution):
     grid = np.column_stack([x1_grid.flatten(), x2_grid.flatten()])
     grid_tensor = torch.tensor(grid, dtype=torch.float32)
     
-    return grid_tensor, x1_grid, x2_grid
+    # Create mask from GeoJSON if provided
+    mask = None
+    if geojson_file is not None:
+        try:
+            import json
+            from shapely.geometry import shape, Point
+            
+            # Load GeoJSON file
+            with open(geojson_file, 'r') as f:
+                geojson = json.load(f)
+            
+            # Get the geometry from the GeoJSON
+            geometry = None
+            if 'features' in geojson and len(geojson['features']) > 0:
+                geometry = shape(geojson['features'][0]['geometry'])
+            elif 'geometry' in geojson:
+                geometry = shape(geojson['geometry'])
+            else:
+                geometry = shape(geojson)
+            
+            # Create mask based on points inside the geometry
+            mask = np.zeros((resolution, resolution), dtype=bool)
+            for i in range(resolution):
+                for j in range(resolution):
+                    point = Point(x1_grid[i, j], x2_grid[i, j])
+                    mask[i, j] = geometry.contains(point)
+        except ImportError:
+            print("Warning: shapely package not installed. Cannot process GeoJSON file.")
+            print("Install with: pip install shapely")
+        except Exception as e:
+            print(f"Error processing GeoJSON file: {e}")
+    
+    return grid_tensor, x1_grid, x2_grid, mask
 
 def true_porosity(x, basin_size=(20, 20)):
     """True porosity function with multiple sweet spots."""
@@ -66,20 +100,27 @@ def true_thickness(x, basin_size=(20, 20)):
     
     return structure + trend + 20  # Add baseline thickness
 
-def visualize_true_geology(basin_size=(20, 20), resolution=30):
+def visualize_true_geology(basin_size=(20, 20), resolution=30, geojson_file=None):
     """
     Visualize the true geological properties.
     
     Args:
         basin_size: Size of the basin in (x, y) kilometers
         resolution: Number of points along each dimension
+        geojson_file: Optional path to a GeoJSON file defining the basin shape
     """
-    grid_tensor, x1_grid, x2_grid = create_basin_grid(basin_size, resolution)
+    grid_tensor, x1_grid, x2_grid, mask = create_basin_grid(basin_size, resolution, geojson_file)
     
     # Calculate true values for visualization
     true_porosity_grid = true_porosity(grid_tensor, basin_size).reshape(resolution, resolution).numpy()
     true_permeability_grid = true_permeability(grid_tensor, basin_size).reshape(resolution, resolution).numpy()
     true_thickness_grid = true_thickness(grid_tensor, basin_size).reshape(resolution, resolution).numpy()
+    
+    # Apply mask if provided
+    if mask is not None:
+        true_porosity_grid = np.ma.masked_array(true_porosity_grid, mask=~mask)
+        true_permeability_grid = np.ma.masked_array(true_permeability_grid, mask=~mask)
+        true_thickness_grid = np.ma.masked_array(true_thickness_grid, mask=~mask)
     
     # Visualize true geology
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -103,9 +144,9 @@ def visualize_true_geology(basin_size=(20, 20), resolution=30):
     plt.colorbar(im2, ax=axes[2])
     
     plt.tight_layout()
-    plt.show()
+    plt.close(fig)  # Close figure instead of showing it
     
-    return grid_tensor, x1_grid, x2_grid, true_porosity_grid, true_permeability_grid, true_thickness_grid
+    return grid_tensor, x1_grid, x2_grid, true_porosity_grid, true_permeability_grid, true_thickness_grid, mask
 
 def add_knowledge_driven_wells(basin_gp, n_wells, basin_size, 
                               prior_functions, uncertainty_weight=0.5,
@@ -267,41 +308,66 @@ def calculate_resources(mean_predictions, resolution, basin_size):
     
     return total_barrels
 
-def prior_porosity(x, basin_size=(20, 20)):
-    """Prior belief about porosity distribution."""
+def prior_porosity(x, basin_size=(20, 20), variation_scale=1.2):
+    """Prior belief about porosity distribution with more complex patterns."""
     x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
     
-    # We believe there's a sweet spot in the northeast
-    spot = 0.2 * torch.exp(-0.1 * ((x_tensor[:, 0] - 15)**2 + (x_tensor[:, 1] - 15)**2))
+    # We believe there's a main sweet spot in the northeast
+    spot1 = 0.2 * torch.exp(-0.08 * ((x_tensor[:, 0] - 15)**2 + (x_tensor[:, 1] - 15)**2))
     
-    # General trend of increasing porosity toward the east (due to deepening basin)
-    trend = 0.05 + 0.1 * (x_tensor[:, 0] / basin_size[0])
+    # Secondary feature in southwest (adding more variation)
+    spot2 = 0.12 * torch.exp(-0.15 * ((x_tensor[:, 0] - 5)**2 + (x_tensor[:, 1] - 5)**2))
     
-    return spot + trend
+    # Potential feature in northwest (adding more variation)
+    spot3 = 0.08 * torch.exp(-0.18 * ((x_tensor[:, 0] - 5)**2 + (x_tensor[:, 1] - 18)**2))
+    
+    # General trend of increasing porosity toward the east (due to deepening basin) with more complex variation
+    trend = 0.05 + 0.1 * (x_tensor[:, 0] / basin_size[0]) * (1.0 + 0.1 * torch.sin(x_tensor[:, 1] * variation_scale))
+    
+    # Add some directional channels as subtle features
+    channel1 = 0.03 * torch.exp(-0.5 * ((x_tensor[:, 1] - 0.8 * x_tensor[:, 0] - 5) ** 2 / 8))
+    
+    return spot1 + spot2 + spot3 + trend + channel1
 
-def prior_permeability(x, basin_size=(20, 20)):
-    """Prior belief about permeability, correlated with porosity but with variations."""
+def prior_permeability(x, basin_size=(20, 20), variation_scale=1.5):
+    """Prior belief about permeability, correlated with porosity but with more complex variations."""
     x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
     
     # Permeability is related to our porosity belief
     porosity_belief = prior_porosity(x_tensor, basin_size)
     
-    # We believe there's a fault zone enhancing permeability in the central area
-    fault_effect = 300 * torch.exp(-0.2 * ((x_tensor[:, 0] - 10)**2) / 4)
+    # We believe there's a main fault zone enhancing permeability
+    fault_effect1 = 300 * torch.exp(-0.2 * ((x_tensor[:, 0] - 10)**2) / 4)
     
-    # Convert from porosity (typical log-linear relationship)
-    perm_base = 10**(porosity_belief * 15)
+    # Secondary fault zone in different direction
+    fault_effect2 = 200 * torch.exp(-0.3 * (((x_tensor[:, 0] - 8)**2 + (x_tensor[:, 1] - 12)**2) / 16))
     
-    return perm_base + fault_effect
+    # Add some diagonal patterns representing fractures
+    fracture1 = 100 * torch.exp(-0.8 * ((x_tensor[:, 1] - x_tensor[:, 0] - 2) ** 2 / 4))
+    fracture2 = 120 * torch.exp(-0.8 * ((x_tensor[:, 1] + x_tensor[:, 0] - 22) ** 2 / 2))
+    
+    # Convert from porosity (typical log-linear relationship) with added variations
+    perm_base = 10**(porosity_belief * (15 + 2 * torch.sin(x_tensor[:, 0] * variation_scale / basin_size[0])))
+    
+    return perm_base + fault_effect1 + fault_effect2 + fracture1 + fracture2
 
-def prior_thickness(x, basin_size=(20, 20)):
-    """Prior belief about reservoir thickness."""
+def prior_thickness(x, basin_size=(20, 20), variation_scale=1.3):
+    """Prior belief about reservoir thickness with more complex structural patterns."""
     x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
     
-    # We believe there's a structural high in the basin center
-    structure = 30 * torch.exp(-0.05 * ((x_tensor[:, 0] - 10)**2 + (x_tensor[:, 1] - 10)**2))
+    # Main structural high in basin center
+    structure1 = 30 * torch.exp(-0.05 * ((x_tensor[:, 0] - 10)**2 + (x_tensor[:, 1] - 10)**2))
     
-    # Basin deepens to the north
-    trend = 20 * (x_tensor[:, 1] / basin_size[1])
+    # Secondary structural high
+    structure2 = 15 * torch.exp(-0.08 * ((x_tensor[:, 0] - 18)**2 + (x_tensor[:, 1] - 6)**2))
     
-    return structure + trend + 15  # Add baseline thickness
+    # Structural low (potential mini-basin)
+    structure3 = -10 * torch.exp(-0.12 * ((x_tensor[:, 0] - 4)**2 + (x_tensor[:, 1] - 16)**2))
+    
+    # Basin deepens to the north with variations
+    trend = 20 * (x_tensor[:, 1] / basin_size[1]) * (1.0 + 0.2 * torch.sin(x_tensor[:, 0] * variation_scale * np.pi / basin_size[0]))
+    
+    # Add some ripple effects representing subtle folds
+    ripple1 = 3 * torch.sin(x_tensor[:, 0] * variation_scale * np.pi / basin_size[0]) * torch.sin(x_tensor[:, 1] * variation_scale * np.pi / basin_size[1])
+    
+    return structure1 + structure2 + structure3 + trend + ripple1 + 15  # Add baseline thickness

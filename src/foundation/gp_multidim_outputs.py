@@ -104,4 +104,4 @@ plt.title('Property 2 (e.g., Permeability)')
 plt.legend()
 
 plt.tight_layout()
-plt.show()
+plt.close()

@@ -1,13 +1,18 @@
+import os
 import json
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 
 class PlotStyler:
-    def __init__(self, config_path:str='../data/plot_config.json'):
+    def __init__(self, config_path:str=None):
         """
         Initialize the PlotStyler with a configuration file.
         :param config_path: Path to the JSON file containing color and style settings.
         """
+
+        if config_path is None:
+            config_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'plot_config.json')
+
         with open(config_path, 'r') as f:
             self.config = json.load(f)
         

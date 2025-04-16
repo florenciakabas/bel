@@ -236,7 +236,8 @@ class BasinExplorationGP:
         return plan_next_well(self, grid, mean, std, strategy, economic_params)
     
     def sequential_exploration(self, grid, n_wells, true_functions, noise_std=0.01, 
-                              strategy='uncertainty', economic_params=None, plot=False):
+                              strategy='uncertainty', economic_params=None, plot=False, 
+                              plot_callback=None, mask=None):
         """
         Sequentially plan and drill exploration wells.
         
@@ -248,6 +249,8 @@ class BasinExplorationGP:
             strategy: Well planning strategy
             economic_params: Economic parameters for 'economic' strategy
             plot: Whether to plot results
+            plot_callback: Optional callback function for custom plotting after each well
+            mask: Optional mask for non-rectangular regions
             
         Returns:
             history: List of exploration steps
@@ -282,6 +285,10 @@ class BasinExplorationGP:
             
             # Add the well to our dataset
             self.add_well(next_location.numpy(), measurements, well_name=f"Well_{len(self.wells) + 1}")
+            
+            # Call custom plot callback if provided
+            if plot_callback is not None:
+                plot_callback(self, i+1, grid, mask=mask)
             
             # Record this step
             step_info = {

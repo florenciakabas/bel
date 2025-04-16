@@ -478,7 +478,7 @@ class BasinExplorationGP:
         
         if plot:
             plt.tight_layout()
-            plt.show()
+            plt.close()
                 
         return history
 
@@ -565,7 +565,7 @@ axes[2].set_ylabel('Y (km)')
 plt.colorbar(im2, ax=axes[2])
 
 plt.tight_layout()
-plt.show()
+plt.close()
 
 # Initialize the exploration framework
 basin_gp = BasinExplorationGP(
@@ -705,7 +705,7 @@ axes[1, 2].set_title('True Thickness')
 plt.colorbar(im5, ax=axes[1, 2])
 
 plt.tight_layout()
-plt.show()
+plt.close()
 
 # Calculate estimated recoverable resources
 def calculate_resources(mean_predictions, grid_size, basin_size):

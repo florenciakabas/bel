@@ -63,4 +63,4 @@ ax3.set_ylabel('Y coordinate')
 plt.colorbar(contour, ax=ax3)
 
 plt.tight_layout()
-plt.show()
+plt.close()

@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import matplotlib.patches as mpatches
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+import os
 
 from basin_gp.model import BasinExplorationGP
 from basin_gp.simulation import (
@@ -21,10 +22,8 @@ from basin_gp.simulation import (
 )
 from plot_styler import PlotStyler
 
-def plot_basin_geology(grid_tensor, x1_grid, x2_grid, data, titles, cmaps, fig_title, wells=None, annotations=None, figsize=(18, 8)):
+def plot_basin_geology(grid_tensor, x1_grid, x2_grid, data, titles, cmaps, fig_title, wells=None, annotations=None, figsize=(18, 8), mask=None, padding=1.0):
     """
-    Create a professional-quality visualization of basin geology.
-    
     Args:
         grid_tensor: Grid of points as tensor
         x1_grid: x-coordinates meshgrid
@@ -36,15 +35,54 @@ def plot_basin_geology(grid_tensor, x1_grid, x2_grid, data, titles, cmaps, fig_t
         wells: List of well locations to overlay
         annotations: Optional annotations to add to plots
         figsize: Figure size
+        mask: Optional binary mask to apply (for non-rectangular regions)
+        padding: Padding factor to ensure wells near edges are visible (default: 1.0)
     """
+    save_path = None
     styler = PlotStyler()
     resolution = x1_grid.shape[0]
     fig, axes = plt.subplots(1, len(data), figsize=figsize)
     fig.suptitle(fig_title, fontsize=16, fontweight='bold', y=0.95)
     
-    for i, (d, title, cmap) in enumerate(zip(data, titles, cmaps)):
-        im = axes[i].contourf(x1_grid, x2_grid, d.reshape(resolution, resolution), levels=20, cmap=cmap, alpha=0.9)
+    # Create masked data if mask is provided
+    masked_data = data
+    if mask is not None:
+        masked_data = []
+        for d in data:
+            masked_d = d.copy()
+            if isinstance(masked_d, torch.Tensor):
+                masked_d = masked_d.numpy()
+            masked_d = np.ma.masked_array(masked_d.reshape(resolution, resolution), mask=~mask)
+            masked_data.append(masked_d)
+    else:
+        masked_data = [d.reshape(resolution, resolution) for d in data]
+    
+    # Set axis limits with padding to ensure wells near edges are visible
+    if wells is not None and len(wells) > 0:
+        well_x = [well['location'][0] for well in wells]
+        well_y = [well['location'][1] for well in wells]
+        x_min, x_max = min(well_x), max(well_x)
+        y_min, y_max = min(well_y), max(well_y)
+        # Add padding around wells to ensure they're visible
+        x_padding = (x_max - x_min) * padding * 0.1
+        y_padding = (y_max - y_min) * padding * 0.1
+        # Ensure minimum padding of 0.5 km
+        x_padding = max(x_padding, 0.5)
+        y_padding = max(y_padding, 0.5)
+    else:
+        x_min, x_max = np.min(x1_grid), np.max(x1_grid)
+        y_min, y_max = np.min(x2_grid), np.max(x2_grid)
+        x_padding = 0
+        y_padding = 0
+    
+    for i, (d, title, cmap) in enumerate(zip(masked_data, titles, cmaps)):
+        im = axes[i].contourf(x1_grid, x2_grid, d, levels=20, cmap=cmap, alpha=0.9)
         styler.apply_style(axes[i], title, "X Distance (km)", "Y Distance (km)")
+        
+        # Set consistent axis limits with padding
+        if wells is not None and len(wells) > 0:
+            axes[i].set_xlim([max(0, x_min - x_padding), min(np.max(x1_grid), x_max + x_padding)])
+            axes[i].set_ylim([max(0, y_min - y_padding), min(np.max(x2_grid), y_max + y_padding)])
         
         # Add colorbar with custom styling
         divider = make_axes_locatable(axes[i])
@@ -57,8 +95,6 @@ def plot_basin_geology(grid_tensor, x1_grid, x2_grid, data, titles, cmaps, fig_t
         
         # Add wells if provided
         if wells is not None:
-            well_x = [well['location'][0] for well in wells]
-            well_y = [well['location'][1] for well in wells]
             initial_wells = [well for well in wells if 'Initial' in well['name']]
             exploration_wells = [well for well in wells if 'Initial' not in well['name']]
             
@@ -94,6 +130,8 @@ def plot_basin_geology(grid_tensor, x1_grid, x2_grid, data, titles, cmaps, fig_t
                                fontsize=12, fontweight='bold', backgroundcolor='white', alpha=0.8)
     
     plt.tight_layout()
+    if save_path is None:
+        plt.close(fig)  # Close figure if not saving
     return fig
 
 def compare_prior_and_true_geology(grid_tensor, x1_grid, x2_grid, basin_size, resolution, wells=None):
@@ -152,10 +190,13 @@ def compare_prior_and_true_geology(grid_tensor, x1_grid, x2_grid, basin_size, re
         ]
     )
     
-    plt.show()
+    plt.close(fig1)
+    plt.close(fig2)
+    plt.close(fig3)
     return fig1, fig2, fig3
 
-def plot_gp_model_evolution(basin_gp, grid_tensor, x1_grid, x2_grid, property_idx=0, property_name="Porosity"):
+def plot_gp_model_evolution(basin_gp, grid_tensor, x1_grid, x2_grid, property_idx=0, property_name="Porosity", 
+                        well_num=None, mask=None, save_path=None, padding=1.0):
     """
     Show the evolution of the GP model with all wells.
     
@@ -165,6 +206,10 @@ def plot_gp_model_evolution(basin_gp, grid_tensor, x1_grid, x2_grid, property_id
         x1_grid, x2_grid: Coordinate grids for plotting
         property_idx: Index of property to show (0=porosity, 1=permeability, 2=thickness)
         property_name: Name of the property
+        well_num: Optional well number for title customization
+        mask: Optional mask for non-rectangular regions
+        save_path: Optional path to save the figure
+        padding: Padding factor to ensure wells are visible
     """
     resolution = x1_grid.shape[0]
     styler = PlotStyler()
@@ -176,9 +221,32 @@ def plot_gp_model_evolution(basin_gp, grid_tensor, x1_grid, x2_grid, property_id
     mean_property = mean[:, property_idx].reshape(resolution, resolution).numpy()
     std_property = std[:, property_idx].reshape(resolution, resolution).numpy()
     
+    # Apply mask if provided
+    if mask is not None:
+        mean_property = np.ma.masked_array(mean_property, mask=~mask)
+        std_property = np.ma.masked_array(std_property, mask=~mask)
+    
     # Create the figure
     fig, axes = plt.subplots(1, 2, figsize=(18, 8))
-    fig.suptitle(f"Gaussian Process Model for {property_name}", fontsize=16, fontweight='bold')
+    title_suffix = f" After {well_num} Wells" if well_num is not None else ""
+    fig.suptitle(f"Gaussian Process Model for {property_name}{title_suffix}", fontsize=16, fontweight='bold')
+    
+    # Get well coordinates for setting limits with padding
+    if basin_gp.wells and len(basin_gp.wells) > 0:
+        well_x = [well['location'][0] for well in basin_gp.wells]
+        well_y = [well['location'][1] for well in basin_gp.wells]
+        x_min, x_max = min(well_x), max(well_x)
+        y_min, y_max = min(well_y), max(well_y)
+        x_padding = (x_max - x_min) * padding * 0.1
+        y_padding = (y_max - y_min) * padding * 0.1
+        # Ensure minimum padding of 0.5 km
+        x_padding = max(x_padding, 0.5)
+        y_padding = max(y_padding, 0.5)
+    else:
+        x_min, x_max = np.min(x1_grid), np.max(x1_grid)
+        y_min, y_max = np.min(x2_grid), np.max(x2_grid)
+        x_padding = 0
+        y_padding = 0
     
     # Plot mean prediction
     im1 = axes[0].contourf(x1_grid, x2_grid, mean_property, levels=20, cmap='viridis', alpha=0.9)
@@ -223,11 +291,16 @@ def plot_gp_model_evolution(basin_gp, grid_tensor, x1_grid, x2_grid, property_id
                 except ValueError:
                     pass
     
+    # Set axis limits with padding
+    for ax in axes:
+        ax.set_xlim([max(0, x_min - x_padding), min(np.max(x1_grid), x_max + x_padding)])
+        ax.set_ylim([max(0, y_min - y_padding), min(np.max(x2_grid), y_max + y_padding)])
+    
     # Add annotations for key features
     low_uncertainty_regions = [
         {'x': well['location'][0], 'y': well['location'][1], 
          'tx': well['location'][0] + 1, 'ty': well['location'][1] - 1}
-        for well in basin_gp.wells[:3]  # Take first few wells
+        for well in basin_gp.wells[:3] if well['location'][0] < x_max - x_padding and well['location'][1] < y_max - y_padding
     ]
     
     for region in low_uncertainty_regions[:1]:  # Just annotate one region to avoid clutter
@@ -237,25 +310,32 @@ def plot_gp_model_evolution(basin_gp, grid_tensor, x1_grid, x2_grid, property_id
                        arrowprops=dict(facecolor='black', shrink=0.05, width=1.5, headwidth=8, alpha=0.7),
                        fontsize=12, fontweight='bold', backgroundcolor='white', alpha=0.8)
     
-    # Find high uncertainty region (away from wells)
+    # Find high uncertainty region (away from wells) within visible area
     high_std_idx = np.unravel_index(np.argmax(std_property), std_property.shape)
     high_x = x1_grid[high_std_idx]
     high_y = x2_grid[high_std_idx]
     
-    axes[1].annotate('Highest Uncertainty', 
-                   xy=(high_x, high_y), 
-                   xytext=(high_x + 2, high_y + 2),
-                   arrowprops=dict(facecolor='black', shrink=0.05, width=1.5, headwidth=8, alpha=0.7),
-                   fontsize=12, fontweight='bold', backgroundcolor='white', alpha=0.8)
+    if high_x < x_max + x_padding and high_y < y_max + y_padding and high_x > x_min - x_padding and high_y > y_min - y_padding:
+        axes[1].annotate('Highest Uncertainty', 
+                      xy=(high_x, high_y), 
+                      xytext=(high_x + min(2, x_padding), high_y + min(2, y_padding)),
+                      arrowprops=dict(facecolor='black', shrink=0.05, width=1.5, headwidth=8, alpha=0.7),
+                      fontsize=12, fontweight='bold', backgroundcolor='white', alpha=0.8)
     
     # Legend
     axes[0].legend(loc='lower right', framealpha=0.9)
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save figure if path is provided
+    if save_path is not None:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Figure saved to {save_path}")
+        plt.close(fig)  # Close figure instead of showing it
     return fig
 
-def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp, 
+def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp, balanced_basin_gp,
                                         grid_tensor, x1_grid, x2_grid, true_values,
                                         property_idx=0, property_name="Porosity"):
     """
@@ -264,6 +344,7 @@ def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp
     Args:
         uncertainty_basin_gp: Basin GP model using uncertainty strategy
         economic_basin_gp: Basin GP model using economic strategy
+        balanced_basin_gp: Basin GP model using balanced strategy
         grid_tensor: Grid points
         x1_grid, x2_grid: Coordinate grids
         true_values: True property values on the grid
@@ -273,13 +354,15 @@ def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp
     resolution = x1_grid.shape[0]
     styler = PlotStyler()
     
-    # Get predictions from both models
+    # Get predictions from all models
     mean_uncertainty, std_uncertainty = uncertainty_basin_gp.predict(grid_tensor)
     mean_economic, std_economic = economic_basin_gp.predict(grid_tensor)
+    mean_balanced, std_balanced = balanced_basin_gp.predict(grid_tensor)
     
     # Extract property values
     mean_uncertainty_prop = mean_uncertainty[:, property_idx].reshape(resolution, resolution).numpy()
     mean_economic_prop = mean_economic[:, property_idx].reshape(resolution, resolution).numpy()
+    mean_balanced_prop = mean_balanced[:, property_idx].reshape(resolution, resolution).numpy()
     
     # Extract true property values
     true_property = true_values[property_idx].reshape(resolution, resolution)
@@ -287,8 +370,9 @@ def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp
     # Prediction errors
     error_uncertainty = np.abs(mean_uncertainty_prop - true_property)
     error_economic = np.abs(mean_economic_prop - true_property)
+    error_balanced = np.abs(mean_balanced_prop - true_property)
     
-    # Create figure
+    # Create figure - now 2x2 grid with the balanced strategy in bottom right
     fig, axes = plt.subplots(2, 2, figsize=(18, 15))
     fig.suptitle(f"Comparison of Exploration Strategies: {property_name}", 
                 fontsize=16, fontweight='bold')
@@ -320,24 +404,14 @@ def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp
     cax3 = divider3.append_axes("right", size="5%", pad=0.1)
     plt.colorbar(im3, cax=cax3)
     
-    # Error comparison
-    error_diff = error_uncertainty - error_economic
-    vmax = max(np.max(np.abs(error_diff)), 0.001)  # Ensure symmetric colorbar
-    
-    im4 = axes[1, 1].contourf(x1_grid, x2_grid, error_diff, levels=20, 
-                            cmap='coolwarm', vmin=-vmax, vmax=vmax, alpha=0.9)
-    styler.apply_style(axes[1, 1], "Error Difference (Uncertainty - Economic)", 
-                     "X Distance (km)", "Y Distance (km)")
+    # Balanced strategy prediction
+    im4 = axes[1, 1].contourf(x1_grid, x2_grid, mean_balanced_prop, levels=20, cmap='viridis', alpha=0.9)
+    styler.apply_style(axes[1, 1], f"Balanced Strategy: {property_name}", "X Distance (km)", "Y Distance (km)")
     
     # Add colorbar
     divider4 = make_axes_locatable(axes[1, 1])
     cax4 = divider4.append_axes("right", size="5%", pad=0.1)
     plt.colorbar(im4, cax=cax4)
-    
-    # Add legend explaining the error difference
-    red_patch = mpatches.Patch(color='red', label='Economic strategy more accurate')
-    blue_patch = mpatches.Patch(color='blue', label='Uncertainty strategy more accurate')
-    axes[1, 1].legend(handles=[red_patch, blue_patch], loc='lower right', framealpha=0.9)
     
     # Add wells to all plots
     for i in range(2):
@@ -395,6 +469,33 @@ def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp
                             pass
                 
                 axes[i, j].legend(loc='lower right', framealpha=0.9)
+                
+            # Add balanced strategy wells to row 1, column 1
+            elif i == 1 and j == 1:
+                initial_wells = [well for well in balanced_basin_gp.wells if 'Initial' in well['name']]
+                exploration_wells = [well for well in balanced_basin_gp.wells if 'Initial' not in well['name']]
+                
+                # Plot initial wells
+                if initial_wells:
+                    x = [well['location'][0] for well in initial_wells]
+                    y = [well['location'][1] for well in initial_wells]
+                    axes[i, j].scatter(x, y, color='black', s=100, marker='x', linewidth=2, 
+                                    label='Initial Wells', zorder=10)
+                
+                # Plot exploration wells with sequential numbering
+                if exploration_wells:
+                    for well in exploration_wells:
+                        axes[i, j].scatter(well['location'][0], well['location'][1], color='blue', s=150, 
+                                        marker='o', edgecolor='black', linewidth=1, alpha=0.7, zorder=10)
+                        # Add well number
+                        try:
+                            well_num = int(well['name'].split('_')[-1])
+                            axes[i, j].text(well['location'][0], well['location'][1], f"{well_num}", 
+                                         ha='center', va='center', color='white', fontweight='bold', zorder=11)
+                        except ValueError:
+                            pass
+                
+                axes[i, j].legend(loc='lower right', framealpha=0.9)
             
             # Add only initial wells to true distribution plot
             elif i == 0 and j == 0:
@@ -410,7 +511,7 @@ def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp
     plt.show()
     return fig
 
-def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp, 
+def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp, balanced_basin_gp,
                                      grid_tensor, basin_size, x1_grid, x2_grid,
                                      economic_params):
     """
@@ -419,6 +520,7 @@ def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp,
     Args:
         uncertainty_basin_gp: Basin GP model using uncertainty strategy
         economic_basin_gp: Basin GP model using economic strategy
+        balanced_basin_gp: Basin GP model using balanced strategy
         grid_tensor: Grid points
         basin_size: Size of the basin
         x1_grid, x2_grid: Coordinate grids
@@ -427,9 +529,10 @@ def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp,
     resolution = x1_grid.shape[0]
     styler = PlotStyler()
     
-    # Get predictions for both strategies
+    # Get predictions for all strategies
     mean_uncertainty, _ = uncertainty_basin_gp.predict(grid_tensor)
     mean_economic, _ = economic_basin_gp.predict(grid_tensor)
+    mean_balanced, _ = balanced_basin_gp.predict(grid_tensor)
     
     # Calculate resource values per grid cell
     hydrocarbon_saturation = 1.0 - economic_params['water_saturation']
@@ -462,13 +565,56 @@ def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp,
         cell_value = recoverable_barrels * oil_price
         
         return recoverable_barrels.reshape(resolution, resolution).numpy(), cell_value.reshape(resolution, resolution).numpy()
+        
+def calculate_resources(mean_pred, resolution, basin_size):
+    """
+    Calculate total recoverable resources based on model predictions.
     
-    # Calculate resources for both strategies
+    Args:
+        mean_pred: Mean predictions [n_points, n_properties]
+        resolution: Grid resolution
+        basin_size: Basin size in km
+        
+    Returns:
+        total_barrels: Total recoverable oil in barrels
+    """
+    # Extract properties
+    porosity = mean_pred[:, 0]
+    permeability = mean_pred[:, 1]
+    thickness = mean_pred[:, 2]
+    
+    # Cell area in m²
+    cell_area = (basin_size[0] / (resolution-1)) * (basin_size[1] / (resolution-1)) * 1e6
+    
+    # Parameters
+    hydrocarbon_saturation = 0.7  # 1 - water saturation
+    formation_volume_factor = 1.1
+    
+    # Original oil in place (m³)
+    ooip = cell_area * thickness * porosity * hydrocarbon_saturation / formation_volume_factor
+    
+    # Recovery factor
+    recovery_factor = 0.1 + 0.2 * torch.log10(torch.clamp(permeability, min=1.0) / 100)
+    recovery_factor = torch.clamp(recovery_factor, 0.05, 0.6)
+    
+    # Recoverable oil (m³)
+    recoverable_oil = ooip * recovery_factor
+    
+    # Convert to barrels
+    recoverable_barrels = recoverable_oil * 6.29
+    
+    # Sum across all cells
+    total_barrels = torch.sum(recoverable_barrels).item()
+    
+    return total_barrels
+    
+    # Calculate resources for all strategies
     barrels_uncertainty, value_uncertainty = calculate_cell_resources(mean_uncertainty)
     barrels_economic, value_economic = calculate_cell_resources(mean_economic)
+    barrels_balanced, value_balanced = calculate_cell_resources(mean_balanced)
     
-    # Create resource map visualization
-    fig, axes = plt.subplots(2, 2, figsize=(18, 15))
+    # Create resource map visualization - now 2x3 grid to show all three strategies
+    fig, axes = plt.subplots(2, 3, figsize=(24, 15))
     fig.suptitle("Resource Assessment Comparison", fontsize=16, fontweight='bold')
     
     # Recoverable barrels - Uncertainty Strategy
@@ -491,25 +637,45 @@ def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp,
     cbar2 = plt.colorbar(im2, cax=cax2)
     cbar2.set_label('Thousands of Barrels')
     
+    # Recoverable barrels - Balanced Strategy
+    im3 = axes[0, 2].contourf(x1_grid, x2_grid, barrels_balanced / 1e3, 
+                            levels=20, cmap='YlOrRd', alpha=0.9)
+    styler.apply_style(axes[0, 2], "Recoverable Oil - Balanced Strategy", 
+                     "X Distance (km)", "Y Distance (km)")
+    divider3 = make_axes_locatable(axes[0, 2])
+    cax3 = divider3.append_axes("right", size="5%", pad=0.1)
+    cbar3 = plt.colorbar(im3, cax=cax3)
+    cbar3.set_label('Thousands of Barrels')
+    
     # Economic value - Uncertainty Strategy
-    im3 = axes[1, 0].contourf(x1_grid, x2_grid, value_uncertainty / 1e6, 
+    im4 = axes[1, 0].contourf(x1_grid, x2_grid, value_uncertainty / 1e6, 
                            levels=20, cmap='Greens', alpha=0.9)
     styler.apply_style(axes[1, 0], "Economic Value - Uncertainty Strategy", 
                      "X Distance (km)", "Y Distance (km)")
-    divider3 = make_axes_locatable(axes[1, 0])
-    cax3 = divider3.append_axes("right", size="5%", pad=0.1)
-    cbar3 = plt.colorbar(im3, cax=cax3)
-    cbar3.set_label('Millions of USD')
-    
-    # Economic value - Economic Strategy
-    im4 = axes[1, 1].contourf(x1_grid, x2_grid, value_economic / 1e6, 
-                           levels=20, cmap='Greens', alpha=0.9)
-    styler.apply_style(axes[1, 1], "Economic Value - Economic Strategy", 
-                     "X Distance (km)", "Y Distance (km)")
-    divider4 = make_axes_locatable(axes[1, 1])
+    divider4 = make_axes_locatable(axes[1, 0])
     cax4 = divider4.append_axes("right", size="5%", pad=0.1)
     cbar4 = plt.colorbar(im4, cax=cax4)
     cbar4.set_label('Millions of USD')
+    
+    # Economic value - Economic Strategy
+    im5 = axes[1, 1].contourf(x1_grid, x2_grid, value_economic / 1e6, 
+                           levels=20, cmap='Greens', alpha=0.9)
+    styler.apply_style(axes[1, 1], "Economic Value - Economic Strategy", 
+                     "X Distance (km)", "Y Distance (km)")
+    divider5 = make_axes_locatable(axes[1, 1])
+    cax5 = divider5.append_axes("right", size="5%", pad=0.1)
+    cbar5 = plt.colorbar(im5, cax=cax5)
+    cbar5.set_label('Millions of USD')
+    
+    # Economic value - Balanced Strategy
+    im6 = axes[1, 2].contourf(x1_grid, x2_grid, value_balanced / 1e6, 
+                           levels=20, cmap='Greens', alpha=0.9)
+    styler.apply_style(axes[1, 2], "Economic Value - Balanced Strategy", 
+                     "X Distance (km)", "Y Distance (km)")
+    divider6 = make_axes_locatable(axes[1, 2])
+    cax6 = divider6.append_axes("right", size="5%", pad=0.1)
+    cbar6 = plt.colorbar(im6, cax=cax6)
+    cbar6.set_label('Millions of USD')
     
     # Add wells to respective plots
     # Uncertainty strategy wells
@@ -559,31 +725,63 @@ def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp,
                           ha='center', va='center', color='white', fontweight='bold', zorder=11)
         except ValueError:
             pass
+            
+    # Balanced strategy wells
+    initial_wells = [well for well in balanced_basin_gp.wells if 'Initial' in well['name']]
+    exploration_wells = [well for well in balanced_basin_gp.wells if 'Initial' not in well['name']]
+    
+    for well in initial_wells:
+        axes[0, 2].scatter(well['location'][0], well['location'][1], color='black', s=100, 
+                         marker='x', linewidth=2, zorder=10)
+        axes[1, 2].scatter(well['location'][0], well['location'][1], color='black', s=100, 
+                         marker='x', linewidth=2, zorder=10)
+    
+    for well in exploration_wells:
+        axes[0, 2].scatter(well['location'][0], well['location'][1], color='blue', s=150, 
+                         marker='o', edgecolor='black', linewidth=1, alpha=0.7, zorder=10)
+        axes[1, 2].scatter(well['location'][0], well['location'][1], color='blue', s=150, 
+                         marker='o', edgecolor='black', linewidth=1, alpha=0.7, zorder=10)
+        try:
+            well_num = int(well['name'].split('_')[-1])
+            axes[0, 2].text(well['location'][0], well['location'][1], f"{well_num}", 
+                          ha='center', va='center', color='white', fontweight='bold', zorder=11)
+            axes[1, 2].text(well['location'][0], well['location'][1], f"{well_num}", 
+                          ha='center', va='center', color='white', fontweight='bold', zorder=11)
+        except ValueError:
+            pass
     
     # Add legends
     for i in range(2):
-        for j in range(2):
+        for j in range(3):
             if j == 0:  # Uncertainty strategy
                 axes[i, j].scatter([], [], color='black', marker='x', s=100, label='Initial Wells')
                 axes[i, j].scatter([], [], color='red', marker='o', s=100, label='Uncertainty Wells')
                 axes[i, j].legend(loc='lower right', framealpha=0.8)
-            else:  # Economic strategy
+            elif j == 1:  # Economic strategy
                 axes[i, j].scatter([], [], color='black', marker='x', s=100, label='Initial Wells')
                 axes[i, j].scatter([], [], color='green', marker='o', s=100, label='Economic Wells')
+                axes[i, j].legend(loc='lower right', framealpha=0.8)
+            else:  # Balanced strategy
+                axes[i, j].scatter([], [], color='black', marker='x', s=100, label='Initial Wells')
+                axes[i, j].scatter([], [], color='blue', marker='o', s=100, label='Balanced Wells')
                 axes[i, j].legend(loc='lower right', framealpha=0.8)
     
     # Add total resource and value information as text boxes
     total_barrels_uncertainty = calculate_resources(mean_uncertainty, resolution, basin_size)
     total_barrels_economic = calculate_resources(mean_economic, resolution, basin_size)
+    total_barrels_balanced = calculate_resources(mean_balanced, resolution, basin_size)
     
     total_value_uncertainty = total_barrels_uncertainty * economic_params['oil_price']
     total_value_economic = total_barrels_economic * economic_params['oil_price']
+    total_value_balanced = total_barrels_balanced * economic_params['oil_price']
     
     total_cost_uncertainty = len(uncertainty_basin_gp.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
     total_cost_economic = len(economic_basin_gp.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
+    total_cost_balanced = len(balanced_basin_gp.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
     
     net_value_uncertainty = total_value_uncertainty - total_cost_uncertainty
     net_value_economic = total_value_economic - total_cost_economic
+    net_value_balanced = total_value_balanced - total_cost_balanced
     
     # Create text for uncertainty strategy (row 0, col 0 and row 1, col 0)
     uncertainty_text = (
@@ -601,9 +799,23 @@ def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp,
         f"Net value: ${net_value_economic/1e9:.2f}B"
     )
     
+    # Create text for balanced strategy (row 0, col 2 and row 1, col 2)
+    balanced_text = (
+        f"Total recoverable: {total_barrels_balanced/1e6:.2f}M barrels\n"
+        f"Gross value: ${total_value_balanced/1e9:.2f}B\n"
+        f"Exploration cost: ${total_cost_balanced/1e6:.2f}M\n"
+        f"Net value: ${net_value_balanced/1e9:.2f}B"
+    )
+    
     # Add text boxes to plots
-    for j in range(2):
-        text = uncertainty_text if j == 0 else economic_text
+    for j in range(3):
+        if j == 0:
+            text = uncertainty_text
+        elif j == 1:
+            text = economic_text
+        else:
+            text = balanced_text
+            
         for i in range(2):
             axes[i, j].text(0.02, 0.02, text, transform=axes[i, j].transAxes,
                           fontsize=10, verticalalignment='bottom', horizontalalignment='left',
@@ -613,16 +825,49 @@ def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp,
     plt.show()
     return fig
 
+def plot_per_well_update(basin_gp, well_num, grid_tensor, mask=None):
+    """
+    Plotting callback function to visualize model update after each well is drilled.
+    
+    Args:
+        basin_gp: The basin exploration model
+        well_num: Current well number
+        grid_tensor: Grid points to predict
+        mask: Optional mask for non-rectangular regions
+    """
+    # Get grid dimensions from tensor
+    resolution = int(np.sqrt(grid_tensor.shape[0]))
+    x_max = torch.max(grid_tensor[:, 0]).item()
+    y_max = torch.max(grid_tensor[:, 1]).item()
+    x1_grid, x2_grid = np.meshgrid(
+        np.linspace(0, x_max, resolution),
+        np.linspace(0, y_max, resolution)
+    )
+    
+    # Make sure plots directory exists
+    os.makedirs("plots/well_sequence", exist_ok=True)
+    
+    # Plot each property
+    property_names = basin_gp.properties
+    for i, prop_name in enumerate(property_names):
+        save_path = f"plots/well_sequence/{prop_name}_after_well_{well_num}.png"
+        plot_gp_model_evolution(
+            basin_gp, grid_tensor, x1_grid, x2_grid,
+            property_idx=i, property_name=prop_name.capitalize(),
+            well_num=well_num, mask=mask, save_path=save_path, padding=1.5
+        )
+
 def main():
     # Basin parameters
     basin_size = (20, 20)  # 20 km x 20 km basin
     resolution = 30  # Grid resolution
     plt.rcParams['figure.max_open_warning'] = 0  # Disable max figure warning
+    geojson_file = None  # Set to path of GeoJSON file if needed
     
     # Create basin grid
     print("Creating basin model and true geology...")
-    grid_tensor, x1_grid, x2_grid, true_por, true_perm, true_thick = visualize_true_geology(
-        basin_size, resolution
+    grid_tensor, x1_grid, x2_grid, true_por, true_perm, true_thick, mask = visualize_true_geology(
+        basin_size, resolution, geojson_file
     )
     
     # 1. SLIDE 1: True Geology Visualization
@@ -697,7 +942,9 @@ def main():
         [true_porosity, true_permeability, true_thickness],
         noise_std=0.01,
         strategy='uncertainty',
-        plot=False  # We'll create our own plots
+        plot=False,  # We'll create our own plots
+        plot_callback=plot_per_well_update,  # Add callback for per-well plotting
+        mask=mask
     )
     
     # Plot the final model after uncertainty-based exploration
@@ -752,7 +999,9 @@ def main():
         noise_std=0.01,
         strategy='economic',
         economic_params=economic_params,
-        plot=False
+        plot=False,
+        plot_callback=plot_per_well_update,  # Add callback for per-well plotting
+        mask=mask
     )
     
     # Plot the final model after economic-based exploration
@@ -771,30 +1020,77 @@ def main():
         property_idx=2, property_name="Thickness (After Economic Exploration)"
     )
     
-    # 6. SLIDE 10-12: Strategy Comparison
+    # 6. NEW: Sequential Exploration - Balanced Strategy
+    # Reset and try balanced exploration-exploitation strategy
+    basin_gp_balanced = BasinExplorationGP(
+        basin_size=basin_size,
+        properties=['porosity', 'permeability', 'thickness']
+    )
+    
+    # Re-add initial wells
+    basin_gp_balanced = add_knowledge_driven_wells(
+        basin_gp_balanced, 
+        n_initial_wells, 
+        basin_size, 
+        [prior_porosity, prior_permeability, prior_thickness],
+        uncertainty_weight=0.3,
+        seed=42
+    )
+    
+    # Run balanced exploration-exploitation strategy
+    print("\nRunning balanced exploration-exploitation strategy...")
+    balanced_history = basin_gp_balanced.sequential_exploration(
+        grid_tensor,
+        n_exploration_wells,
+        [true_porosity, true_permeability, true_thickness],
+        noise_std=0.01,
+        strategy='balance',
+        economic_params=economic_params,
+        plot=False,
+        plot_callback=plot_per_well_update,  # Add callback for per-well plotting
+        mask=mask
+    )
+    
+    # Plot the final model after balanced exploration
+    fig_balanced_porosity = plot_gp_model_evolution(
+        basin_gp_balanced, grid_tensor, x1_grid, x2_grid, 
+        property_idx=0, property_name="Porosity (After Balanced Exploration)"
+    )
+    
+    fig_balanced_permeability = plot_gp_model_evolution(
+        basin_gp_balanced, grid_tensor, x1_grid, x2_grid, 
+        property_idx=1, property_name="Permeability (After Balanced Exploration)"
+    )
+    
+    fig_balanced_thickness = plot_gp_model_evolution(
+        basin_gp_balanced, grid_tensor, x1_grid, x2_grid, 
+        property_idx=2, property_name="Thickness (After Balanced Exploration)"
+    )
+    
+    # 6. SLIDE 10-12: Strategy Comparison (now includes balanced strategy)
     # Compare exploration strategies
     fig_strategy_porosity = plot_exploration_strategy_comparison(
-        uncertainty_basin_gp, basin_gp_economic,
+        uncertainty_basin_gp, basin_gp_economic, basin_gp_balanced,
         grid_tensor, x1_grid, x2_grid, [true_por, true_perm, true_thick],
         property_idx=0, property_name="Porosity"
     )
     
     fig_strategy_permeability = plot_exploration_strategy_comparison(
-        uncertainty_basin_gp, basin_gp_economic,
+        uncertainty_basin_gp, basin_gp_economic, basin_gp_balanced,
         grid_tensor, x1_grid, x2_grid, [true_por, true_perm, true_thick],
         property_idx=1, property_name="Permeability"
     )
     
     fig_strategy_thickness = plot_exploration_strategy_comparison(
-        uncertainty_basin_gp, basin_gp_economic,
+        uncertainty_basin_gp, basin_gp_economic, basin_gp_balanced,
         grid_tensor, x1_grid, x2_grid, [true_por, true_perm, true_thick],
         property_idx=2, property_name="Thickness"
     )
     
-    # 7. SLIDE 13: Resource Assessment
+    # 7. SLIDE 13: Resource Assessment (now includes balanced strategy)
     # Compare resource assessment between strategies
     fig_resources = resource_assessment_visualization(
-        uncertainty_basin_gp, basin_gp_economic,
+        uncertainty_basin_gp, basin_gp_economic, basin_gp_balanced,
         grid_tensor, basin_size, x1_grid, x2_grid,
         economic_params
     )
@@ -832,12 +1128,39 @@ def main():
     print(f"Total exploration cost: ${total_cost_economic/1e6:.2f} million")
     print(f"Net value: ${net_value_economic/1e9:.2f} billion")
     
-    # Compute strategy comparison stats
-    value_diff = net_value_economic - net_value_uncertainty
-    value_pct = (value_diff / net_value_uncertainty) * 100 if net_value_uncertainty != 0 else float('inf')
+    # Calculate predicted resources for balanced strategy
+    basin_gp_balanced.fit(verbose=False)
+    mean_balanced, _ = basin_gp_balanced.predict(grid_tensor)
     
+    total_resources_balanced = calculate_resources(mean_balanced, resolution, basin_size)
+    total_value_balanced = total_resources_balanced * economic_params['oil_price']
+    total_cost_balanced = len(balanced_basin_gp.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
+    net_value_balanced = total_value_balanced - total_cost_balanced
+    
+    print("\nBalanced Strategy Results:")
+    print(f"Estimated total recoverable resources: {total_resources_balanced/1e6:.2f} million barrels")
+    print(f"Estimated total economic value: ${total_value_balanced/1e9:.2f} billion")
+    print(f"Total exploration cost: ${total_cost_balanced/1e6:.2f} million")
+    print(f"Net value: ${net_value_balanced/1e9:.2f} billion")
+    
+    # Compute strategy comparison stats
     print("\nStrategy Comparison:")
-    print(f"Value difference (Economic - Uncertainty): ${value_diff/1e9:.2f} billion ({value_pct:.1f}%)")
+    
+    # Economic vs. Uncertainty
+    value_diff_econ_vs_uncert = net_value_economic - net_value_uncertainty
+    value_pct_econ_vs_uncert = (value_diff_econ_vs_uncert / net_value_uncertainty) * 100 if net_value_uncertainty != 0 else float('inf')
+    print(f"Value difference (Economic - Uncertainty): ${value_diff_econ_vs_uncert/1e9:.2f} billion ({value_pct_econ_vs_uncert:.1f}%)")
+    
+    # Balanced vs. Uncertainty
+    value_diff_bal_vs_uncert = net_value_balanced - net_value_uncertainty
+    value_pct_bal_vs_uncert = (value_diff_bal_vs_uncert / net_value_uncertainty) * 100 if net_value_uncertainty != 0 else float('inf')
+    print(f"Value difference (Balanced - Uncertainty): ${value_diff_bal_vs_uncert/1e9:.2f} billion ({value_pct_bal_vs_uncert:.1f}%)")
+    
+    # Balanced vs. Economic
+    value_diff_bal_vs_econ = net_value_balanced - net_value_economic
+    value_pct_bal_vs_econ = (value_diff_bal_vs_econ / net_value_economic) * 100 if net_value_economic != 0 else float('inf')
+    print(f"Value difference (Balanced - Economic): ${value_diff_bal_vs_econ/1e9:.2f} billion ({value_pct_bal_vs_econ:.1f}%)")
+    
     print("=" * 50)
     
     print("\nPlots have been generated and saved for your slide deck.")

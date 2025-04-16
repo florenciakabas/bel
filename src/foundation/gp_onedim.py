@@ -74,4 +74,4 @@ ax.axvline(x=0, color='k', linestyle='--')
 styler.apply_style(ax, title='Kernel Functions (Correlation with point x=0)',
                    xlabel='x', ylabel='k(x, 0)')
 ax.legend()
-plt.show()
+plt.close()
