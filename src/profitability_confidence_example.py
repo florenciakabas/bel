@@ -1,8 +1,9 @@
 """
 Profitability Confidence Example using Gaussian Process modeling.
 
-This script demonstrates the Value of Information (VOI) strategy for optimizing
-exploration to quickly reach confidence in project profitability.
+This script implements a benchmark comparison of exploration strategies,
+focusing on minimizing the number of wells needed to reach target
+confidence level in project profitability.
 """
 
 import torch

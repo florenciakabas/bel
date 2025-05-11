@@ -13,17 +13,22 @@ class BasinExplorationGP:
     Comprehensive framework for basin exploration using multi-output GPs.
     """
     
-    def __init__(self, basin_size=(10, 10), properties=['porosity', 'permeability', 'thickness']):
+    def __init__(self, basin_size=(10, 10), properties=['porosity', 'permeability', 'thickness'],
+                 length_scale=None):
         """
         Initialize the Basin Exploration GP framework.
 
         Args:
             basin_size: Size of the basin in (x, y) kilometers
             properties: List of geological properties to model
+            length_scale: Length scale parameter for the GP kernel. Controls the
+                         spatial correlation range of the geological properties.
+                         Default is None (auto-determined during training).
         """
         self.basin_size = basin_size
         self.properties = properties
         self.n_properties = len(properties)
+        self.length_scale = length_scale
 
         # Model components will be initialized later
         self.model = None
@@ -78,54 +83,77 @@ class BasinExplorationGP:
         self.wells.append(well_data)
         return well_data
     
-    def _create_model(self, X, Y):
-        """Create the multi-output GP model."""
+    def _create_model(self, X, Y, length_scale=None):
+        """
+        Create the multi-output GP model.
+
+        Args:
+            X: Training input locations [n_points, 2]
+            Y: Training target values [n_points, n_properties]
+            length_scale: Length scale parameter for the Matern kernel.
+                          Controls the smoothness of the GP. Default is None (auto-determined).
+        """
         # Define model class internally
         class MultitaskGPModel(gpytorch.models.ExactGP):
-            def __init__(self, train_x, train_y, likelihood, n_properties):
+            def __init__(self, train_x, train_y, likelihood, n_properties, length_scale=None):
                 super(MultitaskGPModel, self).__init__(train_x, train_y, likelihood)
-                
+
                 # Mean module
                 self.mean_module = gpytorch.means.MultitaskMean(
                     gpytorch.means.ConstantMean(), num_tasks=n_properties
                 )
-                
+
                 # Base kernel
-                self.base_covar_module = gpytorch.kernels.ScaleKernel(
-                    gpytorch.kernels.MaternKernel(nu=1.5)
-                )
-                
+                if length_scale is None:
+                    # Auto-determine length scale
+                    matern_kernel = gpytorch.kernels.MaternKernel(nu=1.5)
+                else:
+                    # Use specified length scale
+                    matern_kernel = gpytorch.kernels.MaternKernel(
+                        nu=1.5,
+                        lengthscale=length_scale
+                    )
+
+                self.base_covar_module = gpytorch.kernels.ScaleKernel(matern_kernel)
+
                 # Multi-task kernel
                 self.covar_module = gpytorch.kernels.MultitaskKernel(
                     self.base_covar_module, num_tasks=n_properties, rank=n_properties-1
                 )
-            
+
             def forward(self, x):
                 mean_x = self.mean_module(x)
                 covar_x = self.covar_module(x)
                 return gpytorch.distributions.MultitaskMultivariateNormal(mean_x, covar_x)
-        
+
         # Initialize likelihood and model
         self.likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=self.n_properties)
-        self.model = MultitaskGPModel(X, Y, self.likelihood, self.n_properties)
+        self.model = MultitaskGPModel(X, Y, self.likelihood, self.n_properties, length_scale)
     
-    def fit(self, learning_rate=0.01, iterations=500, verbose=True):
+    def fit(self, learning_rate=0.01, iterations=500, verbose=True, length_scale=None):
         """
         Fit the GP model to the well data.
-        
+
         Args:
             learning_rate: Learning rate for optimization
             iterations: Number of training iterations
             verbose: Whether to print training progress
-            
+            length_scale: Length scale parameter for the GP kernel. Controls
+                         smoothness of the geological properties. Larger values
+                         result in smoother surfaces. Default is None (auto-determined).
+
         Returns:
             Loss value at the end of training
         """
         # Prepare training data
         X, Y, mask = prepare_training_data(self.wells, self.n_properties)
-        
-        # Create model
-        self._create_model(X, Y)
+
+        # Use instance length_scale if none provided to this method
+        if length_scale is None:
+            length_scale = self.length_scale
+
+        # Create model with specified length scale
+        self._create_model(X, Y, length_scale=length_scale)
         
         # Training
         self.model.train()
@@ -368,7 +396,7 @@ class BasinExplorationGP:
         # Sum up total EMV across all locations
         total_emv = torch.sum(emv).item()
 
-        # Estimate total variance (simplifying by assuming independence)
+        # Sum variance components (covariance terms negligible per Rose 2001)
         total_variance = torch.sum(emv_variance).item()
 
         # Get total cost
@@ -383,8 +411,7 @@ class BasinExplorationGP:
         std_dev = np.sqrt(total_variance)
 
         if std_dev > 0:
-            # Calculate probability that net value > 0
-            # Use scipy's norm.cdf which is more robust than manually calculating with erf
+            # Calculate probability that net value > 0 using normal CDF
             confidence = stats.norm.cdf(net_value / std_dev)
         else:
             # If variance is 0, confidence is either 0 or 1

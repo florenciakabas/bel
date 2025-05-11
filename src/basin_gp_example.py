@@ -1,9 +1,16 @@
 """
 Basin Exploration Example using Gaussian Process modeling.
 
-This script demonstrates how to use the basin_gp module for modeling 
+This script demonstrates how to use the basin_gp module for modeling
 geological properties and planning exploration wells. It creates
 publication-quality plots suitable for presentation slides.
+
+Key features demonstrated:
+- Gaussian Process modeling of geological properties
+- Different exploration strategies (uncertainty, economic, balanced)
+- Customizable kernel length-scale parameters for controlling spatial correlation
+- Adjustable geological smoothness for synthetic data generation
+- Advanced visualization and comparison of exploration strategies
 """
 
 import torch
@@ -872,8 +879,10 @@ def main(show_plots=False):
     
     # Create basin grid
     print("Creating basin model and true geology...")
+    # Using a smoothness parameter of 1.2 for slightly smoother geological properties
+    smoothness = 1.2
     grid_tensor, x1_grid, x2_grid, true_por, true_perm, true_thick, mask = visualize_true_geology(
-        basin_size, resolution, geojson_file
+        basin_size, resolution, geojson_file, smoothness=smoothness
     )
     
     # 1. SLIDE 1: True Geology Visualization
@@ -895,7 +904,8 @@ def main(show_plots=False):
     # Initialize the exploration framework
     basin_gp = BasinExplorationGP(
         basin_size=basin_size,
-        properties=['porosity', 'permeability', 'thickness']
+        properties=['porosity', 'permeability', 'thickness'],
+        length_scale=1.0  # Using explicit length_scale for more control over spatial correlation
     )
     
     # 2. SLIDE 2: Prior Beliefs vs. True Geology
@@ -942,10 +952,15 @@ def main(show_plots=False):
     n_exploration_wells = 5
     print("\nRunning uncertainty-based exploration...")
     uncertainty_basin_gp = basin_gp  # Keep reference to current state
+    # Define custom property functions with fixed smoothness for consistent results
+    def true_por_func(x): return true_porosity(x, basin_size, smoothness)
+    def true_perm_func(x): return true_permeability(x, basin_size, smoothness)
+    def true_thick_func(x): return true_thickness(x, basin_size, smoothness)
+
     uncertainty_history = uncertainty_basin_gp.sequential_exploration(
         grid_tensor,
         n_exploration_wells,
-        [true_porosity, true_permeability, true_thickness],
+        [true_por_func, true_perm_func, true_thick_func],
         noise_std=0.01,
         strategy='uncertainty',
         plot=False,  # We'll create our own plots
@@ -973,7 +988,8 @@ def main(show_plots=False):
     # Reset and try economic-based strategy
     basin_gp_economic = BasinExplorationGP(
         basin_size=basin_size,
-        properties=['porosity', 'permeability', 'thickness']
+        properties=['porosity', 'permeability', 'thickness'],
+        length_scale=2.0  # Using larger length_scale for economic model (smoother geological assumptions)
     )
     
     # Re-add initial wells
@@ -1001,7 +1017,7 @@ def main(show_plots=False):
     economic_history = basin_gp_economic.sequential_exploration(
         grid_tensor,
         n_exploration_wells,
-        [true_porosity, true_permeability, true_thickness],
+        [true_por_func, true_perm_func, true_thick_func],  # Using the same functions as defined earlier
         noise_std=0.01,
         strategy='economic',
         economic_params=economic_params,
@@ -1030,7 +1046,8 @@ def main(show_plots=False):
     # Reset and try balanced exploration-exploitation strategy
     basin_gp_balanced = BasinExplorationGP(
         basin_size=basin_size,
-        properties=['porosity', 'permeability', 'thickness']
+        properties=['porosity', 'permeability', 'thickness'],
+        length_scale=0.8  # Using smaller length_scale for balanced model (less smoothing, more local features)
     )
     
     # Re-add initial wells
@@ -1048,7 +1065,7 @@ def main(show_plots=False):
     balanced_history = basin_gp_balanced.sequential_exploration(
         grid_tensor,
         n_exploration_wells,
-        [true_porosity, true_permeability, true_thickness],
+        [true_por_func, true_perm_func, true_thick_func],  # Using the same functions as defined earlier
         noise_std=0.01,
         strategy='balanced',
         economic_params=economic_params,

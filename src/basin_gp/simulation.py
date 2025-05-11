@@ -58,63 +58,108 @@ def create_basin_grid(basin_size, resolution, geojson_file=None):
     
     return grid_tensor, x1_grid, x2_grid, mask
 
-def true_porosity(x, basin_size=(20, 20)):
-    """True porosity function with multiple sweet spots."""
+def true_porosity(x, basin_size=(20, 20), smoothness=1.0):
+    """
+    True porosity function with multiple sweet spots.
+
+    Args:
+        x: Locations [n_points, 2]
+        basin_size: Size of basin in km (width, height)
+        smoothness: Controls spatial variability. Higher values create smoother
+                   geological properties (smaller length-scale features).
+                   Default: 1.0
+
+    Returns:
+        Porosity values at specified locations
+    """
     x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
-    
+
+    # Apply smoothness factor to the exponent terms (controls the width of features)
+    smoothness_factor = 1.0 / smoothness  # Inverse relationship: higher smoothness -> wider features
+
     # Major sweet spot
-    spot1 = 0.25 * torch.exp(-0.1 * ((x_tensor[:, 0] - 5)**2 + (x_tensor[:, 1] - 15)**2))
-    
+    spot1 = 0.25 * torch.exp(-0.1 * smoothness_factor * ((x_tensor[:, 0] - 5)**2 + (x_tensor[:, 1] - 15)**2))
+
     # Secondary sweet spot
-    spot2 = 0.2 * torch.exp(-0.15 * ((x_tensor[:, 0] - 15)**2 + (x_tensor[:, 1] - 8)**2))
-    
+    spot2 = 0.2 * torch.exp(-0.15 * smoothness_factor * ((x_tensor[:, 0] - 15)**2 + (x_tensor[:, 1] - 8)**2))
+
     # Background trend (increasing toward the north-east)
     trend = 0.05 + 0.1 * (x_tensor[:, 0] / basin_size[0] + x_tensor[:, 1] / basin_size[1]) / 2
-    
+
     return spot1 + spot2 + trend
 
-def true_permeability(x, basin_size=(20, 20)):
-    """Permeability linked to porosity but with its own spatial patterns."""
+def true_permeability(x, basin_size=(20, 20), smoothness=1.0):
+    """
+    Permeability linked to porosity but with its own spatial patterns.
+
+    Args:
+        x: Locations [n_points, 2]
+        basin_size: Size of basin in km (width, height)
+        smoothness: Controls spatial variability. Higher values create smoother
+                  geological properties. Default: 1.0
+
+    Returns:
+        Permeability values at specified locations (mD)
+    """
     x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
-    
+
     # Get porosity (main driver)
-    porosity = true_porosity(x_tensor, basin_size)
-    
-    # Additional spatial variation
-    fault_effect = 500 * torch.exp(-0.2 * (x_tensor[:, 0] - 10)**2 / 4)
-    
+    porosity = true_porosity(x_tensor, basin_size, smoothness)
+
+    # Apply smoothness factor
+    smoothness_factor = 1.0 / smoothness
+
+    # Additional spatial variation with smoothness control
+    fault_effect = 500 * torch.exp(-0.2 * smoothness_factor * (x_tensor[:, 0] - 10)**2 / 4)
+
     # Convert from porosity (typical log-linear relationship)
     perm_base = 10**(porosity * 15 - 1)  # Typical transform
-    
+
     return perm_base + fault_effect
 
-def true_thickness(x, basin_size=(20, 20)):
-    """Reservoir thickness with structural trends."""
+def true_thickness(x, basin_size=(20, 20), smoothness=1.0):
+    """
+    Reservoir thickness with structural trends.
+
+    Args:
+        x: Locations [n_points, 2]
+        basin_size: Size of basin in km (width, height)
+        smoothness: Controls spatial variability. Higher values create smoother
+                   geological properties. Default: 1.0
+
+    Returns:
+        Thickness values at specified locations (m)
+    """
     x_tensor = torch.tensor(x, dtype=torch.float32) if not isinstance(x, torch.Tensor) else x
-    
+
+    # Apply smoothness factor
+    smoothness_factor = 1.0 / smoothness
+
     # Main structural high
-    structure = 40 * torch.exp(-0.05 * ((x_tensor[:, 0] - 10)**2 + (x_tensor[:, 1] - 10)**2))
-    
+    structure = 40 * torch.exp(-0.05 * smoothness_factor * ((x_tensor[:, 0] - 10)**2 + (x_tensor[:, 1] - 10)**2))
+
     # Basin deepening trend toward the south
     trend = 30 * (1 - x_tensor[:, 1] / basin_size[1])
-    
+
     return structure + trend + 20  # Add baseline thickness
 
-def visualize_true_geology(basin_size=(20, 20), resolution=30, geojson_file=None):
+def visualize_true_geology(basin_size=(20, 20), resolution=30, geojson_file=None, smoothness=1.0):
     """
     Visualize the true geological properties.
-    
+
     Args:
         basin_size: Size of the basin in (x, y) kilometers
         resolution: Number of points along each dimension
         geojson_file: Optional path to a GeoJSON file defining the basin shape
+        smoothness: Controls spatial variability. Higher values create smoother
+                  geological properties. Default: 1.0
     """
     grid_tensor, x1_grid, x2_grid, mask = create_basin_grid(basin_size, resolution, geojson_file)
-    
-    # Calculate true values for visualization
-    true_porosity_grid = true_porosity(grid_tensor, basin_size).reshape(resolution, resolution).numpy()
-    true_permeability_grid = true_permeability(grid_tensor, basin_size).reshape(resolution, resolution).numpy()
-    true_thickness_grid = true_thickness(grid_tensor, basin_size).reshape(resolution, resolution).numpy()
+
+    # Calculate true values for visualization with specified smoothness
+    true_porosity_grid = true_porosity(grid_tensor, basin_size, smoothness).reshape(resolution, resolution).numpy()
+    true_permeability_grid = true_permeability(grid_tensor, basin_size, smoothness).reshape(resolution, resolution).numpy()
+    true_thickness_grid = true_thickness(grid_tensor, basin_size, smoothness).reshape(resolution, resolution).numpy()
     
     # Apply mask if provided
     if mask is not None:
@@ -147,6 +192,177 @@ def visualize_true_geology(basin_size=(20, 20), resolution=30, geojson_file=None
     plt.close(fig)  # Close figure instead of showing it
     
     return grid_tensor, x1_grid, x2_grid, true_porosity_grid, true_permeability_grid, true_thickness_grid, mask
+
+def analyze_length_scale_sensitivity(length_scales, uncertainty_threshold=0.05, max_wells=20,
+                               basin_size=(20, 20), n_simulations=5, properties=None,
+                               smoothness=1.0, strategy='voi', economic_params=None):
+    """
+    Analyze how different length-scale parameters affect exploration performance.
+    For each length scale, create a synthetic basin and run exploration until
+    a target uncertainty level is reached or max wells are drilled.
+
+    Args:
+        length_scales: List of length scale values to test
+        uncertainty_threshold: Threshold for "adequate understanding" (mean std below this value)
+        max_wells: Maximum number of wells to drill per simulation
+        basin_size: Size of the basin in (x, y) kilometers
+        n_simulations: Number of simulation runs for each length scale (for statistical reliability)
+        properties: List of properties to model (default: ['porosity', 'permeability', 'thickness'])
+        smoothness: Smoothness parameter for the synthetic data generation
+        strategy: Well planning strategy ('uncertainty', 'voi', etc.)
+        economic_params: Economic parameters (required for some strategies)
+
+    Returns:
+        Dictionary with results for each length scale:
+            - wells_required: Mean number of wells required to reach uncertainty threshold
+            - uncertainty_curves: List of uncertainty curves across wells
+            - exploration_maps: Spatial distribution of wells
+            - raw_data: Raw simulation data
+    """
+    import torch
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from .model import BasinExplorationGP
+
+    if properties is None:
+        properties = ['porosity', 'permeability', 'thickness']
+
+    # Create economic parameters if needed and not provided
+    if economic_params is None and (strategy == 'economic' or strategy == 'balanced' or strategy == 'voi'):
+        economic_params = {
+            'area': 1.0e6,  # m²
+            'water_saturation': 0.3,
+            'formation_volume_factor': 1.1,
+            'oil_price': 80,  # $ per barrel
+            'drilling_cost': 8e6,  # $
+            'completion_cost': 4e6  # $
+        }
+
+    # Grid for evaluation
+    resolution = 30
+    grid_tensor, x1_grid, x2_grid, _ = create_basin_grid(basin_size, resolution)
+
+    # Store results for each length scale
+    results = {}
+
+    for length_scale in length_scales:
+        print(f"\nAnalyzing length scale = {length_scale}")
+
+        # Container for this length scale's results
+        length_scale_results = {
+            'wells_required': [],
+            'uncertainty_curves': [],
+            'exploration_maps': [],
+            'raw_data': []
+        }
+
+        # Run multiple simulations
+        for sim in range(n_simulations):
+            print(f"  Simulation {sim+1}/{n_simulations}")
+
+            # Create a new model with the current length scale
+            basin_gp = BasinExplorationGP(
+                basin_size=basin_size,
+                properties=properties,
+                length_scale=length_scale
+            )
+
+            # Add an initial point to ensure model can be trained
+            initial_loc = torch.tensor([[basin_size[0]/2, basin_size[1]/2]])
+            initial_measurements = {}
+
+            # Get measurements for this location
+            for i, prop in enumerate(properties):
+                # Get true function
+                prop_func = globals()[f"true_{prop}"]
+                # Add noise to the measurement
+                value = prop_func(initial_loc, basin_size, smoothness).item()
+                initial_measurements[prop] = value + np.random.normal(0, value * 0.05)  # 5% noise
+
+            # Add initial well and fit model
+            basin_gp.add_well(initial_loc.numpy(), initial_measurements, well_name="Initial_Well")
+            basin_gp.fit(verbose=False, length_scale=length_scale)
+
+            # Sequential exploration statistics
+            wells_so_far = 0
+            uncertainty_curve = []
+            well_locations = []
+            reached_threshold = False
+
+            # Keep track of mean uncertainty
+            mean_uncertainty = float('inf')
+
+            # Run sequential exploration
+            while wells_so_far < max_wells and mean_uncertainty > uncertainty_threshold:
+                # Get current state
+                if basin_gp.model is not None:
+                    mean, std = basin_gp.predict(grid_tensor)
+                    mean_uncertainty = torch.mean(std).item()
+                    uncertainty_curve.append(mean_uncertainty)
+
+                # Make sure model is trained before planning next well
+                if basin_gp.model is None:
+                    basin_gp.fit(verbose=False, length_scale=length_scale)
+
+                # Plan next well
+                next_location, score, _ = basin_gp.plan_next_well(
+                    grid_tensor,
+                    strategy=strategy,
+                    economic_params=economic_params
+                )
+
+                # "Drill" the well (get true values with noise)
+                measurements = {}
+                for i, prop in enumerate(properties):
+                    # Get true function
+                    prop_func = globals()[f"true_{prop}"]
+                    # Add noise to the measurement
+                    value = prop_func(next_location.reshape(1, -1), basin_size, smoothness).item()
+                    measurements[prop] = value + np.random.normal(0, value * 0.05)  # 5% noise
+
+                # Add the well
+                basin_gp.add_well(next_location.numpy(), measurements)
+                well_locations.append(next_location.numpy())
+
+                # Update the model
+                basin_gp.fit(verbose=False, length_scale=length_scale)
+
+                # Increment wells
+                wells_so_far += 1
+
+                # Check if we've reached the threshold
+                if mean_uncertainty <= uncertainty_threshold:
+                    reached_threshold = True
+                    print(f"    Reached uncertainty threshold after {wells_so_far} wells")
+                    break
+
+            # Record results for this simulation
+            if reached_threshold:
+                length_scale_results['wells_required'].append(wells_so_far)
+            else:
+                length_scale_results['wells_required'].append(max_wells)  # Did not reach threshold
+                print(f"    Did not reach uncertainty threshold after {max_wells} wells")
+
+            length_scale_results['uncertainty_curves'].append(uncertainty_curve)
+            length_scale_results['exploration_maps'].append(well_locations)
+
+            # Add raw data
+            length_scale_results['raw_data'].append({
+                'model': basin_gp,
+                'uncertainty_curve': uncertainty_curve,
+                'well_locations': well_locations,
+                'reached_threshold': reached_threshold,
+                'final_uncertainty': mean_uncertainty
+            })
+
+        # Calculate average wells required
+        avg_wells = sum(length_scale_results['wells_required']) / n_simulations
+        print(f"  Average wells required for length scale {length_scale}: {avg_wells:.2f}")
+
+        # Store results for this length scale
+        results[length_scale] = length_scale_results
+
+    return results
 
 def add_knowledge_driven_wells(basin_gp, n_wells, basin_size, 
                               prior_functions, uncertainty_weight=0.5,

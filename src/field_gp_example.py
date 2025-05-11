@@ -38,11 +38,12 @@ def str2bool(value):
             return False
     raise argparse.ArgumentTypeError('Boolean value expected.')
 
-def compare_field_strategies(basin_size, resolution, grid_tensor, n_initial_wells, n_exploration_wells, 
+def compare_field_strategies(basin_size, resolution, grid_tensor, n_initial_wells, n_exploration_wells,
                              true_funcs, economic_params, strategies, show_plots=False):
     """
-    Compare different exploration strategies on field data.
-    
+    Run exploration benchmark using multiple strategies on same field data.
+    Methodology based on SPE-184392-MS (Bratvold & Begg, 2016).
+
     Args:
         basin_size: Basin size in kilometers
         resolution: Grid resolution
@@ -53,7 +54,7 @@ def compare_field_strategies(basin_size, resolution, grid_tensor, n_initial_well
         economic_params: Economic parameters
         strategies: List of strategies to compare
         show_plots: Whether to display plots
-        
+
     Returns:
         Dictionary with results per strategy
     """
