@@ -10,9 +10,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../src'
 from basin_gp.model import BasinExplorationGP
 from basin_gp.data import prepare_training_data
 from basin_gp.planning import (
-    plan_next_well_uncertainty, 
+    plan_next_well_uncertainty,
     plan_next_well_ei,
     plan_next_well_economic,
+    plan_next_well_balanced,
     calculate_economic_value
 )
 from basin_gp.simulation import (
@@ -150,9 +151,9 @@ class TestBasinExplorationGP(unittest.TestCase):
         """Test economic value calculation"""
         # Create test data
         grid = torch.tensor([[1.0, 1.0], [5.0, 5.0]], dtype=torch.float32)
-        mean = torch.tensor([[0.1, 100, 20], [0.2, 200, 30]], dtype=torch.float32) 
+        mean = torch.tensor([[0.1, 100, 20], [0.2, 200, 30]], dtype=torch.float32)
         std = torch.tensor([[0.01, 10, 2], [0.02, 20, 3]], dtype=torch.float32)
-        
+
         economic_params = {
             'area': 1.0e6,  # m²
             'water_saturation': 0.3,
@@ -161,16 +162,55 @@ class TestBasinExplorationGP(unittest.TestCase):
             'drilling_cost': 1e7,
             'completion_cost': 5e6
         }
-        
+
         # Calculate EMV
         emv = calculate_economic_value(grid, mean, std, economic_params)
-        
+
         # Check shape
         self.assertEqual(emv.shape, (2,))
-        
+
         # Location 2 should have higher EMV due to better properties
         self.assertGreater(emv[1].item(), emv[0].item())
         
+    def test_balanced_strategy(self):
+        """Test balanced strategy for well planning"""
+        # Create test grid and predictions
+        grid = torch.tensor([[1.0, 1.0], [5.0, 5.0], [9.0, 9.0]], dtype=torch.float32)
+        mean = torch.tensor([[0.1, 100, 20], [0.2, 150, 30], [0.15, 120, 25]], dtype=torch.float32)
+        std = torch.tensor([[0.05, 50, 5], [0.1, 80, 10], [0.02, 30, 2]], dtype=torch.float32)
+
+        economic_params = {
+            'area': 1.0e6,  # m²
+            'water_saturation': 0.3,
+            'formation_volume_factor': 1.1,
+            'oil_price': 80,
+            'drilling_cost': 1e7,
+            'completion_cost': 5e6
+        }
+
+        # Test balanced strategy with balance_factor=0.5 (equal weight)
+        location, score, score_grid = plan_next_well_balanced(grid, mean, std, economic_params, balance_factor=0.5)
+
+        # Check shape of results
+        self.assertEqual(score_grid.shape, (3,))
+
+        # Test with different balance factors
+        # Economic-focused (balance_factor=0.0)
+        location_econ, _, _ = plan_next_well_balanced(grid, mean, std, economic_params, balance_factor=0.0)
+
+        # Uncertainty-focused (balance_factor=1.0)
+        location_uncert, _, _ = plan_next_well_balanced(grid, mean, std, economic_params, balance_factor=1.0)
+
+        # Location for uncertainty focus should match pure uncertainty strategy
+        _, _, uncertainty_scores = plan_next_well_uncertainty(grid, mean, std)
+        uncert_loc = grid[torch.argmax(uncertainty_scores)]
+        self.assertTrue(torch.allclose(location_uncert, uncert_loc))
+
+        # Location for economic focus should match pure economic strategy
+        _, _, economic_scores = plan_next_well_economic(grid, mean, std, economic_params)
+        econ_loc = grid[torch.argmax(economic_scores)]
+        self.assertTrue(torch.allclose(location_econ, econ_loc))
+
     def test_true_functions(self):
         """Test the simulation functions"""
         # Create test locations
@@ -198,7 +238,7 @@ class TestBasinExplorationGP(unittest.TestCase):
         """Test sequential exploration"""
         # Create a small grid
         grid_tensor, _, _ = create_basin_grid((10, 10), 10)
-        
+
         # Run sequential exploration for a single well
         history = self.model.sequential_exploration(
             grid_tensor,
@@ -221,6 +261,55 @@ class TestBasinExplorationGP(unittest.TestCase):
         self.assertIn('measurements', step)
         self.assertIn('score', step)
         self.assertEqual(step['strategy'], 'uncertainty')
+
+    def test_sequential_exploration_balanced(self):
+        """Test sequential exploration with balanced strategy"""
+        # Create a small grid
+        grid_tensor, _, _ = create_basin_grid((10, 10), 10)
+
+        # Create a new model for this test
+        model = BasinExplorationGP(
+            basin_size=(10, 10),
+            properties=['porosity', 'permeability', 'thickness']
+        )
+
+        # Add initial wells
+        model.add_well([2, 3], {'porosity': 0.15, 'permeability': 100, 'thickness': 30})
+        model.add_well([7, 8], {'porosity': 0.25, 'permeability': 200, 'thickness': 40})
+
+        # Define economic parameters
+        economic_params = {
+            'area': 1.0e6,  # m²
+            'water_saturation': 0.3,
+            'formation_volume_factor': 1.1,
+            'oil_price': 80,
+            'drilling_cost': 1e7,
+            'completion_cost': 5e6
+        }
+
+        # Run sequential exploration for a single well with balanced strategy
+        history = model.sequential_exploration(
+            grid_tensor,
+            n_wells=1,
+            true_functions=[true_porosity, true_permeability, true_thickness],
+            noise_std=0.01,
+            strategy='balanced',
+            economic_params=economic_params,
+            plot=False
+        )
+
+        # Check that history was recorded
+        self.assertEqual(len(history), 1)
+
+        # Check that the well was added
+        self.assertEqual(len(model.wells), 3)  # 2 initial + 1 new
+
+        # Check history format
+        step = history[0]
+        self.assertIn('well_location', step)
+        self.assertIn('measurements', step)
+        self.assertIn('score', step)
+        self.assertEqual(step['strategy'], 'balanced')
         
 if __name__ == '__main__':
     unittest.main()

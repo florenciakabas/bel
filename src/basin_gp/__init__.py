@@ -1,6 +1,6 @@
 from .model import BasinExplorationGP
 from .data import prepare_training_data
-from .planning import plan_next_well_uncertainty, plan_next_well_ei, plan_next_well_economic
+from .planning import plan_next_well_uncertainty, plan_next_well_ei, plan_next_well_economic, plan_next_well_balanced
 
 __all__ = [
     'BasinExplorationGP',
@@ -8,4 +8,5 @@ __all__ = [
     'plan_next_well_uncertainty',
     'plan_next_well_ei',
     'plan_next_well_economic',
+    'plan_next_well_balanced',
 ]

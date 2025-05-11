@@ -335,16 +335,16 @@ def plot_gp_model_evolution(basin_gp, grid_tensor, x1_grid, x2_grid, property_id
         plt.close(fig)  # Close figure instead of showing it
     return fig
 
-def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp, balanced_basin_gp,
+def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp, basin_gp_balanced,
                                         grid_tensor, x1_grid, x2_grid, true_values,
-                                        property_idx=0, property_name="Porosity"):
+                                        property_idx=0, property_name="Porosity", show_plots=False):
     """
     Compare different exploration strategies with side-by-side visualization.
     
     Args:
         uncertainty_basin_gp: Basin GP model using uncertainty strategy
         economic_basin_gp: Basin GP model using economic strategy
-        balanced_basin_gp: Basin GP model using balanced strategy
+        basin_gp_balanced: Basin GP model using balanced strategy
         grid_tensor: Grid points
         x1_grid, x2_grid: Coordinate grids
         true_values: True property values on the grid
@@ -357,7 +357,7 @@ def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp
     # Get predictions from all models
     mean_uncertainty, std_uncertainty = uncertainty_basin_gp.predict(grid_tensor)
     mean_economic, std_economic = economic_basin_gp.predict(grid_tensor)
-    mean_balanced, std_balanced = balanced_basin_gp.predict(grid_tensor)
+    mean_balanced, std_balanced = basin_gp_balanced.predict(grid_tensor)
     
     # Extract property values
     mean_uncertainty_prop = mean_uncertainty[:, property_idx].reshape(resolution, resolution).numpy()
@@ -472,8 +472,8 @@ def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp
                 
             # Add balanced strategy wells to row 1, column 1
             elif i == 1 and j == 1:
-                initial_wells = [well for well in balanced_basin_gp.wells if 'Initial' in well['name']]
-                exploration_wells = [well for well in balanced_basin_gp.wells if 'Initial' not in well['name']]
+                initial_wells = [well for well in basin_gp_balanced.wells if 'Initial' in well['name']]
+                exploration_wells = [well for well in basin_gp_balanced.wells if 'Initial' not in well['name']]
                 
                 # Plot initial wells
                 if initial_wells:
@@ -508,19 +508,22 @@ def plot_exploration_strategy_comparison(uncertainty_basin_gp, economic_basin_gp
                     axes[i, j].legend(loc='lower right', framealpha=0.9)
     
     plt.tight_layout()
-    plt.show()
+    if show_plots:
+        plt.show()
+    else:
+        plt.close(fig)
     return fig
 
-def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp, balanced_basin_gp,
+def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp, basin_gp_balanced,
                                      grid_tensor, basin_size, x1_grid, x2_grid,
-                                     economic_params):
+                                     economic_params, show_plots=False):
     """
     Visualize and compare resource assessments from different strategies.
     
     Args:
         uncertainty_basin_gp: Basin GP model using uncertainty strategy
         economic_basin_gp: Basin GP model using economic strategy
-        balanced_basin_gp: Basin GP model using balanced strategy
+        basin_gp_balanced: Basin GP model using balanced strategy
         grid_tensor: Grid points
         basin_size: Size of the basin
         x1_grid, x2_grid: Coordinate grids
@@ -532,7 +535,7 @@ def resource_assessment_visualization(uncertainty_basin_gp, economic_basin_gp, b
     # Get predictions for all strategies
     mean_uncertainty, _ = uncertainty_basin_gp.predict(grid_tensor)
     mean_economic, _ = economic_basin_gp.predict(grid_tensor)
-    mean_balanced, _ = balanced_basin_gp.predict(grid_tensor)
+    mean_balanced, _ = basin_gp_balanced.predict(grid_tensor)
     
     # Calculate resource values per grid cell
     hydrocarbon_saturation = 1.0 - economic_params['water_saturation']
@@ -727,8 +730,8 @@ def calculate_resources(mean_pred, resolution, basin_size):
             pass
             
     # Balanced strategy wells
-    initial_wells = [well for well in balanced_basin_gp.wells if 'Initial' in well['name']]
-    exploration_wells = [well for well in balanced_basin_gp.wells if 'Initial' not in well['name']]
+    initial_wells = [well for well in basin_gp_balanced.wells if 'Initial' in well['name']]
+    exploration_wells = [well for well in basin_gp_balanced.wells if 'Initial' not in well['name']]
     
     for well in initial_wells:
         axes[0, 2].scatter(well['location'][0], well['location'][1], color='black', s=100, 
@@ -777,7 +780,7 @@ def calculate_resources(mean_pred, resolution, basin_size):
     
     total_cost_uncertainty = len(uncertainty_basin_gp.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
     total_cost_economic = len(economic_basin_gp.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
-    total_cost_balanced = len(balanced_basin_gp.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
+    total_cost_balanced = len(basin_gp_balanced.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
     
     net_value_uncertainty = total_value_uncertainty - total_cost_uncertainty
     net_value_economic = total_value_economic - total_cost_economic
@@ -822,7 +825,10 @@ def calculate_resources(mean_pred, resolution, basin_size):
                           bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8))
     
     plt.tight_layout()
-    plt.show()
+    if show_plots:
+        plt.show()
+    else:
+        plt.close(fig)
     return fig
 
 def plot_per_well_update(basin_gp, well_num, grid_tensor, mask=None):
@@ -857,7 +863,7 @@ def plot_per_well_update(basin_gp, well_num, grid_tensor, mask=None):
             well_num=well_num, mask=mask, save_path=save_path, padding=1.5
         )
 
-def main():
+def main(show_plots=False):
     # Basin parameters
     basin_size = (20, 20)  # 20 km x 20 km basin
     resolution = 30  # Grid resolution
@@ -1044,7 +1050,7 @@ def main():
         n_exploration_wells,
         [true_porosity, true_permeability, true_thickness],
         noise_std=0.01,
-        strategy='balance',
+        strategy='balanced',
         economic_params=economic_params,
         plot=False,
         plot_callback=plot_per_well_update,  # Add callback for per-well plotting
@@ -1072,27 +1078,27 @@ def main():
     fig_strategy_porosity = plot_exploration_strategy_comparison(
         uncertainty_basin_gp, basin_gp_economic, basin_gp_balanced,
         grid_tensor, x1_grid, x2_grid, [true_por, true_perm, true_thick],
-        property_idx=0, property_name="Porosity"
+        property_idx=0, property_name="Porosity", show_plots=show_plots
     )
-    
+
     fig_strategy_permeability = plot_exploration_strategy_comparison(
         uncertainty_basin_gp, basin_gp_economic, basin_gp_balanced,
         grid_tensor, x1_grid, x2_grid, [true_por, true_perm, true_thick],
-        property_idx=1, property_name="Permeability"
+        property_idx=1, property_name="Permeability", show_plots=show_plots
     )
-    
+
     fig_strategy_thickness = plot_exploration_strategy_comparison(
         uncertainty_basin_gp, basin_gp_economic, basin_gp_balanced,
         grid_tensor, x1_grid, x2_grid, [true_por, true_perm, true_thick],
-        property_idx=2, property_name="Thickness"
+        property_idx=2, property_name="Thickness", show_plots=show_plots
     )
-    
+
     # 7. SLIDE 13: Resource Assessment (now includes balanced strategy)
     # Compare resource assessment between strategies
     fig_resources = resource_assessment_visualization(
         uncertainty_basin_gp, basin_gp_economic, basin_gp_balanced,
         grid_tensor, basin_size, x1_grid, x2_grid,
-        economic_params
+        economic_params, show_plots=show_plots
     )
     
     # Calculate and display final results
@@ -1134,7 +1140,7 @@ def main():
     
     total_resources_balanced = calculate_resources(mean_balanced, resolution, basin_size)
     total_value_balanced = total_resources_balanced * economic_params['oil_price']
-    total_cost_balanced = len(balanced_basin_gp.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
+    total_cost_balanced = len(basin_gp_balanced.wells) * (economic_params['drilling_cost'] + economic_params['completion_cost'])
     net_value_balanced = total_value_balanced - total_cost_balanced
     
     print("\nBalanced Strategy Results:")
@@ -1167,4 +1173,15 @@ def main():
     print("The visualizations demonstrate the entire workflow of basin exploration using Gaussian Process models.")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    # Create argument parser
+    parser = argparse.ArgumentParser(description='Basin exploration simulation using Gaussian Process modeling')
+    parser.add_argument('--show-plots', action='store_true', default=False,
+                        help='Show plots during execution (default: False)')
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Run main function with the provided arguments
+    main(show_plots=args.show_plots)
