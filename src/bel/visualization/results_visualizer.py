@@ -228,7 +228,15 @@ class ResultsVisualizer:
             cont = ax.contourf(x_grid, y_grid, uncertainty, cmap=cmap, vmin=vmin, vmax=vmax)
             
             # Add wells for this stage
-            wells_so_far = np.concatenate(well_history[:i+1]) if i > 0 else well_history[0]
+            if i == 0:
+                wells_so_far = well_history[0]
+            else:
+                wells_so_far = np.vstack(well_history[:i+1])
+            
+            # Ensure wells_so_far is 2D
+            if wells_so_far.ndim == 1:
+                wells_so_far = wells_so_far.reshape(1, -1)
+                
             ax.scatter(
                 wells_so_far[:, 0],
                 wells_so_far[:, 1],
