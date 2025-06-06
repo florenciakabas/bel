@@ -417,11 +417,33 @@ def run_exploration_simulation(n_wells: int = 3, random_seed: int = 42):
     )
 
     # Generate prior model (this represents our initial belief)
-    # We use a different seed to make it different from reality
+    # We use a different seed and larger discrepancy to make it more different from reality
     prior_model = generate_geological_model(
         grid_size=(20, 20),
-        random_seed=random_seed + 100
+        random_seed=random_seed + 500  # Much different seed to create larger initial uncertainty
     )
+
+    # Introduce systematic biases in the prior model to make it more different from reality
+    # For example, we might overestimate porosity and underestimate thickness
+    for prop in prior_model['properties']:
+        # Add random bias to each property (±15%)
+        np.random.seed(random_seed + hash(prop) % 10000)
+        bias_factor = np.random.uniform(0.85, 1.15)  # ±15% bias
+        prior_model['properties'][prop] *= bias_factor
+
+        # Add additional noise to represent initial uncertainty
+        # Use absolute value to ensure the standard deviation is positive
+        noise_scale = abs(np.mean(prior_model['properties'][prop])) * 0.1
+        noise = np.random.normal(0, noise_scale, prior_model['properties'][prop].shape)
+        prior_model['properties'][prop] += noise
+
+        # Ensure values are within realistic ranges
+        if prop == 'Porosity':
+            prior_model['properties'][prop] = np.clip(prior_model['properties'][prop], 0.01, 0.2)
+        elif prop == 'Permeability':
+            prior_model['properties'][prop] = np.clip(prior_model['properties'][prop], 0.01, 1.0)
+        elif prop == 'SW':  # Water saturation
+            prior_model['properties'][prop] = np.clip(prior_model['properties'][prop], 0.1, 0.9)
 
     # Create production and economic models
     production_model = PretrainedProductionModel()
@@ -440,10 +462,17 @@ def run_exploration_simulation(n_wells: int = 3, random_seed: int = 42):
     wells = []
 
     # Create directory for results
-    os.makedirs('results', exist_ok=True)
-    os.makedirs('results/npv_progression', exist_ok=True)
-    os.makedirs('results/information_gain', exist_ok=True)
-    os.makedirs('results/property_evolution', exist_ok=True)
+    # Make sure these directories exist before trying to save files
+    result_dirs = [
+        'results',
+        'results/npv_progression',
+        'results/information_gain',
+        'results/property_evolution'
+    ]
+
+    for directory in result_dirs:
+        os.makedirs(directory, exist_ok=True)
+        print(f"Ensuring directory exists: {directory}")
 
     # Store property evolution for creating progression plot later
     property_evolution = {
@@ -612,7 +641,14 @@ def run_exploration_simulation(n_wells: int = 3, random_seed: int = 42):
 
         # Calculate NPV at this location BEFORE update
         before_properties = {prop: prior_model['properties'][prop][i, j] for prop in prior_model['properties']}
-        before_production = production_model.predict_production(before_properties, time_points_days)
+
+        # Add some noise to before_production to simulate prediction uncertainty
+        # Set random seed based on well index for reproducibility
+        np.random.seed(random_seed + 500 + well_idx)
+        before_production_base = production_model.predict_production(before_properties, time_points_days)
+        prediction_noise = np.random.normal(1.0, 0.2, size=len(before_production_base))  # 20% noise
+        before_production = before_production_base * prediction_noise
+
         before_npv = economic_model.calculate_npv(before_production, time_points_years)
 
         # Update our belief based on well data
@@ -630,8 +666,21 @@ def run_exploration_simulation(n_wells: int = 3, random_seed: int = 42):
             prior_map = prior_model['properties'][prop]
             true_value = true_properties[prop]
 
-            # Update prior map with true value based on influence
-            prior_model['properties'][prop] = prior_map * (1 - influence) + true_value * influence
+            # Add some measurement noise to the true value to simulate imperfect measurements
+            # Use well index and property name to create a unique but reproducible random seed for each property measurement
+            prop_seed = hash(prop) % 10000  # Get a hash value from the property name
+            np.random.seed(random_seed + well_idx * 100 + prop_seed)
+            # Ensure standard deviation is positive
+            noise_scale = abs(true_value) * 0.05  # 5% noise
+            measurement_noise = np.random.normal(0, noise_scale)  # 5% noise
+            measured_value = true_value + measurement_noise
+
+            # Cap the maximum influence to avoid perfect knowledge even at the well location
+            max_influence = 0.85  # Maximum 85% influence from well data
+            capped_influence = influence * max_influence
+
+            # Update prior map with measured value based on influence
+            prior_model['properties'][prop] = prior_map * (1 - capped_influence) + measured_value * capped_influence
 
         # Store updated property maps for evolution plot
         property_evolution[f'well_{well_idx+1}'] = {
@@ -640,7 +689,15 @@ def run_exploration_simulation(n_wells: int = 3, random_seed: int = 42):
 
         # Calculate NPV at this location AFTER update
         after_properties = {prop: prior_model['properties'][prop][i, j] for prop in prior_model['properties']}
-        after_production = production_model.predict_production(after_properties, time_points_days)
+
+        # After drilling, our prediction should be more accurate but still have some uncertainty
+        # Use a different random seed for after-drilling calculation
+        np.random.seed(random_seed + 1000 + well_idx)
+        after_production_base = production_model.predict_production(after_properties, time_points_days)
+        # Less noise after drilling (10% vs 20% before drilling)
+        after_prediction_noise = np.random.normal(1.0, 0.1, size=len(after_production_base))
+        after_production = after_production_base * after_prediction_noise
+
         after_npv = economic_model.calculate_npv(after_production, time_points_years)
 
         # Calculate Monte Carlo NPV at the well location
@@ -784,7 +841,9 @@ def run_exploration_simulation(n_wells: int = 3, random_seed: int = 42):
         before_uncertainty = initial_uncertainty_map[wells[-1]['i'], wells[-1]['j']] if well_idx == 0 else updated_uncertainty[wells[-1]['i'], wells[-1]['j']]
 
         # Calculate updated uncertainty at the well location
-        after_uncertainty = 0  # At the well location, uncertainty becomes zero
+        # In reality, there is always some residual uncertainty even after direct measurement
+        # Using 10-20% of original uncertainty is more realistic than 0
+        after_uncertainty = before_uncertainty * 0.15  # 85% reduction instead of 100%
 
         # Calculate information gain metrics
         uncertainty_reduction = before_uncertainty - after_uncertainty
@@ -962,46 +1021,83 @@ def run_exploration_simulation(n_wells: int = 3, random_seed: int = 42):
     # Create property evolution visualization
     # For each property, create a progression plot showing how it evolved with each well
     for prop in ['Porosity', 'Permeability', 'Thickness', 'TOC']:
-        plt.figure(figsize=(15, 10))
-
+        # For a large number of wells, split into multiple figures
+        # Maximum 9 subplots per figure (3x3 grid)
+        max_plots_per_figure = 9
+        n_figures = (n_wells + 2) // max_plots_per_figure + 1  # +2 for initial state and buffer
+        
         # Determine min/max for consistent colorbar
         all_values = []
         for stage, maps in property_evolution.items():
             all_values.append(maps[prop].flatten())
-
+        
         all_values = np.concatenate(all_values)
         vmin, vmax = np.min(all_values), np.max(all_values)
-
-        # Plot initial state
-        plt.subplot(2, (n_wells + 1) // 2, 1)
-        cont = plt.contourf(prior_model['X'], prior_model['Y'], property_evolution['initial'][prop],
-                           cmap='viridis', vmin=vmin, vmax=vmax)
-        plt.colorbar(label=prop)
-        plt.title(f"Initial {prop} Map")
-        plt.xlabel("Longitude")
-        plt.ylabel("Latitude")
-
-        # Plot state after each well
-        for well_idx in range(n_wells):
-            plt.subplot(2, (n_wells + 1) // 2, well_idx + 2)
-            cont = plt.contourf(prior_model['X'], prior_model['Y'],
-                               property_evolution[f'well_{well_idx+1}'][prop],
-                               cmap='viridis', vmin=vmin, vmax=vmax)
-            plt.colorbar(label=prop)
-
-            # Plot wells drilled up to this point
-            for i in range(well_idx + 1):
-                color = 'red' if i == well_idx else 'black'
-                size = 100 if i == well_idx else 50
-                plt.scatter(wells[i]['x'], wells[i]['y'], c=color, s=size, marker='o', edgecolor='white')
-
-            plt.title(f"{prop} After Well {well_idx + 1}")
-            plt.xlabel("Longitude")
-            plt.ylabel("Latitude")
-
-        plt.tight_layout()
-        plt.savefig(f'results/property_evolution/{prop}_evolution.png', dpi=300)
-        plt.close()
+        
+        # Process wells in batches
+        plot_idx = 0
+        for fig_idx in range(n_figures):
+            # Calculate how many plots for this figure
+            start_well = fig_idx * max_plots_per_figure - 1  # -1 to account for initial state
+            end_well = min(start_well + max_plots_per_figure, n_wells)
+            n_plots = end_well - start_well
+            
+            if start_well < 0:  # First figure includes initial state
+                n_plots += 1
+                has_initial = True
+            else:
+                has_initial = False
+            
+            if n_plots <= 0:
+                break  # No more wells to plot
+                
+            # Create figure with appropriate size
+            plt.figure(figsize=(15, 10))
+            
+            # Calculate grid dimensions - aim for roughly square layout
+            n_cols = min(3, n_plots)
+            n_rows = (n_plots + n_cols - 1) // n_cols
+            
+            # Plot initial state in first figure
+            if has_initial:
+                plt.subplot(n_rows, n_cols, 1)
+                cont = plt.contourf(prior_model['X'], prior_model['Y'], property_evolution['initial'][prop], 
+                                  cmap='viridis', vmin=vmin, vmax=vmax)
+                plt.colorbar(label=prop)
+                plt.title(f"Initial {prop} Map")
+                plt.xlabel("Longitude")
+                plt.ylabel("Latitude")
+                plot_idx = 1
+            else:
+                plot_idx = 0
+            
+            # Plot state after each well in this batch
+            for rel_well_idx in range(n_plots - (1 if has_initial else 0)):
+                well_idx = start_well + rel_well_idx + (1 if has_initial else 0)
+                if well_idx >= n_wells:
+                    break
+                    
+                plt.subplot(n_rows, n_cols, plot_idx + 1)
+                cont = plt.contourf(prior_model['X'], prior_model['Y'], 
+                                  property_evolution[f'well_{well_idx+1}'][prop], 
+                                  cmap='viridis', vmin=vmin, vmax=vmax)
+                plt.colorbar(label=prop)
+                
+                # Plot wells drilled up to this point
+                for i in range(well_idx + 1):
+                    color = 'red' if i == well_idx else 'black'
+                    size = 100 if i == well_idx else 50
+                    plt.scatter(wells[i]['x'], wells[i]['y'], c=color, s=size, marker='o', edgecolor='white')
+                
+                plt.title(f"{prop} After Well {well_idx + 1}")
+                plt.xlabel("Longitude")
+                plt.ylabel("Latitude")
+                plot_idx += 1
+            
+            plt.tight_layout()
+            batch_label = f"_batch{fig_idx+1}" if n_figures > 1 else ""
+            plt.savefig(f'results/property_evolution/{prop}_evolution{batch_label}.png', dpi=300)
+            plt.close()
 
     # Create NPV distribution progression plot
     plt.figure(figsize=(15, 8))
@@ -1104,7 +1200,7 @@ if __name__ == "__main__":
     # Parse command line arguments
     import argparse
     parser = argparse.ArgumentParser(description="Run exploration simulation with pre-trained model")
-    parser.add_argument("--wells", type=int, default=3, help="Number of exploration wells to drill")
+    parser.add_argument("--wells", type=int, default=10, help="Number of exploration wells to drill")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--show", action="store_true", help="Show plots")
     args = parser.parse_args()

@@ -7,8 +7,10 @@
       "Bash(python:*)",
       "Bash(source:*)",
       "WebFetchTool(domain:docs.anthropic.com)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(./venv/Scripts/python.exe examples/pretrained_model_demo.py --wells 3)"
     ],
     "deny": []
-  }
+  },
+  "enableAllProjectMcpServers": false
 }
