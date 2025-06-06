@@ -1,0 +1,17 @@
+Topic: Oil and Gas - Unconventional Resources - Exploration
+
+Goal: Develop an optimal sampling strategy that minimizes the number of wells required to answer the question of "will this project enable profit of M millions of dollars ?" with X% of certainty.
+
+The workflow should look like this:
+
+ - given an understanding (prior distributions) of geological properties in a basin as modelled by gaussian processes.
+ - given a machine learning model that predicts production from the same set of geological properties in a specific location in a basin.
+
+ - estimate oil recovery if placing W wells strategically and operating them for N years (development life horizon)
+ - make an assessment of profitability (with uncertainty range). This requires an economic model underlying computations to get to expected NPV. 
+ - leverage value of information to decide where to drill the next exploration well
+ - simulate drilling said well and LEARNING about the REAL geological properties at that location
+ - update beliefs (update the gaussian process model)
+
+ - iterate until one of these 2 things happens first: a maximum number maxEW for maximum exploration wells is reached OR we can answer the original question of profitability in a satisfactory manner
+
