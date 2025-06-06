@@ -1,6 +1,6 @@
 Topic: Oil and Gas - Unconventional Resources - Exploration
 
-Goal: Develop an optimal sampling strategy that minimizes the number of wells required to answer the question of "will this project enable profit of M millions of dollars ?" with X% of certainty.
+Goal: Develop an optimal sampling strategy that minimizes the number of wells required to answer the question of "will this project enable profit of M millions of dollars ?" with X% of certainty. In other words, we are building an adaptive exploration system that learns as it goes
 
 The workflow should look like this:
 
